@@ -1,4 +1,7 @@
+
 # swarm-share-lite
+
+[![Java CI with Gradle](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml)
 
 **P2P chunk-based file distribution with logarithmic peer scaling.**
 
