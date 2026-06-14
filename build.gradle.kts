@@ -45,6 +45,6 @@ project(":cli")         { dependencies {
     implementation(project(":storage"))
     implementation(project(":networking"))
     implementation(project(":transfer"))
-    implementation("info.picocli:picocli:4.7.6")
+    implementation("info.picocli:picocli:4.7.7")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.1")
 } }
