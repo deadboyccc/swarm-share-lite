@@ -17,10 +17,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Coverage targets:
  * <ul>
- *   <li>Correctness — known SHA-256 vectors (NIST / RFC-standard inputs)</li>
- *   <li>Edge inputs — empty array, null/blank/malformed expected hash</li>
- *   <li>Case insensitivity — uppercase hex in expectedHash accepted</li>
- *   <li>Virtual-thread safety — concurrent compute() calls produce stable results</li>
+ * <li>Correctness — known SHA-256 vectors (NIST / RFC-standard inputs)</li>
+ * <li>Edge inputs — empty array, null/blank/malformed expected hash</li>
+ * <li>Case insensitivity — uppercase hex in expectedHash accepted</li>
+ * <li>Virtual-thread safety — concurrent compute() calls produce stable results</li>
  * </ul>
  *
  * <p>The implementation is stateless (no {@code ThreadLocal}), so there is no
@@ -72,7 +72,8 @@ class ChecksumVerifierTest {
 
         assertThat(hash)
                 .hasSize(64)
-                .matches("[0-9a-f]+", "must be lowercase hex");
+                .as("must be lowercase hex")
+                .matches("[0-9a-f]+");
     }
 
     // ── verify() — happy path ────────────────────────────────────────────────────
@@ -199,4 +200,3 @@ class ChecksumVerifierTest {
         return s.getBytes(StandardCharsets.UTF_8);
     }
 }
-
