@@ -1,290 +1,288 @@
+swarm-share-lite
 
-# swarm-share-lite
+""Java CI with Gradle" (https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml/badge.svg)" (https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml)
 
-[![Java CI with Gradle](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml)
+""Dependabot Updates" (https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependabot/dependabot-updates/badge.svg)" (https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependabot/dependabot-updates)
 
-[![Dependabot Updates](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependabot/dependabot-updates)
+""Automatic Dependency Submission" (https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependency-graph/auto-submission/badge.svg)" (https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependency-graph/auto-submission)
 
-[![Automatic Dependency Submission](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependency-graph/auto-submission/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependency-graph/auto-submission)
+P2P chunk-based file distribution with logarithmic peer scaling.
 
-**P2P chunk-based file distribution with logarithmic peer scaling.**
+Traditional file distribution bottlenecks at the source. swarm-share-lite turns every node that receives a chunk into a server, allowing throughput to grow as the swarm expands.
 
-Traditional file distribution bottlenecks at the source. swarm-share turns every node that receives a chunk into a server, enabling exponential throughput growth as the swarm expands.
+---
 
-## The Problem
+Features
 
-Distributing a 5 GB Linux ISO across 14 machines in a LAN:
+- Chunk-based file distribution
+- Parallel downloads from multiple peers
+- SHA-256 chunk verification
+- Resume interrupted downloads
+- Virtual-thread concurrency (Java 25)
+- Random-access writes using "FileChannel"
+- Clean layered architecture
+- Simple TCP wire protocol
 
-**Sequential approach (1–2 sources):**
-- Source uploads to machine 2: ~5 GB
-- Source uploads to machine 3: ~5 GB
-- ... repeat 12 more times
-- **Total time: ~70 GB transferred**
+---
 
-**Parallel swarm approach:**
-- Round 1: Sources 1–2 each serve 2 machines → 4 total with the file
-- Round 2: Sources 1–4 each serve 2 machines → 8 total
-- Round 3: Sources 1–8 each serve 2 machines → 16 total (all done)
-- **Total time: ~20 GB transferred** (mostly parallel)
+Why?
 
-The difference: **3.5× faster** with just 14 machines. At 100 nodes, the gap widens further.
+Imagine distributing a 5 GB Linux ISO to 14 machines on a LAN.
 
-## How It Works
+Traditional Approach
 
-### 1. Manifest Creation (Seeder)
+One source sends the file to every machine:
 
-The seeder splits the file into fixed-size chunks (default 1 MB) and creates a **manifest** — a JSON contract describing the transfer:
+Seeder → Peer 1
+Seeder → Peer 2
+Seeder → Peer 3
+...
+Seeder → Peer 14
 
-```json
+Approximately 70 GB must be transferred by the source.
+
+Swarm Approach
+
+Round 1: 2 peers
+Round 2: 4 peers
+Round 3: 8 peers
+Round 4: 16 peers
+
+Every completed peer immediately becomes a source for others.
+
+Benefits:
+
+- Lower load on the original seeder
+- Faster distribution
+- Better scalability as peer count grows
+
+---
+
+How It Works
+
+1. Manifest Generation
+
+The seeder splits a file into fixed-size chunks and generates a manifest describing:
+
+- File metadata
+- Chunk boundaries
+- SHA-256 checksums
+
+Example:
+
 {
   "fileHash": "e3b0c44298fc1c...",
   "fileName": "ubuntu-25.04.iso",
   "totalSize": 5368709120,
-  "chunkSize": 1048576,
-  "chunks": [
-    {
-      "index": 0,
-      "offset": 0,
-      "size": 1048576,
-      "sha256": "abc123def456..."
-    },
-    ...
-  ]
+  "chunkSize": 1048576
 }
-```
 
-All peers must agree on this manifest to participate.
+2. Peer Discovery
 
-### 2. Peer Discovery (Leechers)
+Peers exchange chunk availability using a compact "BitSet".
 
-Before downloading, each leecher asks known peers: *"Which chunks do you have?"*
+A set bit means:
 
-Peers respond with a **BitSet** — a compact bitmap where bit `i` = 1 means the peer holds chunk `i`. This one-time query allows intelligent peer selection.
+bit[i] = 1
 
-### 3. Parallel Download
+The peer owns chunk "i".
 
-Each leecher spawns a virtual thread per missing chunk and downloads from whoever holds it:
-- **Chunk 0** → fetch from peer A (has it) → verify SHA-256 → write to disk
-- **Chunk 1** → fetch from peer B (has it) → verify SHA-256 → write to disk
-- **Chunk 2** → fetch from peer C (has it) → verify SHA-256 → write to disk
-- ... all in parallel
+3. Parallel Download
 
-Writes go directly to the correct byte offset — no sequential assembly step.
+Missing chunks are downloaded concurrently from any peer that owns them.
 
-### 4. Resume Support
+Each chunk is:
 
-Restart the download? The leecher scans the output file:
-- For each chunk on disk, recompute its SHA-256
-- If hash matches the manifest, mark as held
-- Resume from the next missing chunk
+1. Requested
+2. Downloaded
+3. Hash verified
+4. Written directly to its file offset
 
-No metadata file needed; the file itself is the recovery log.
+4. Resume Support
 
-### 5. Serving (All Nodes)
+On restart:
 
-As soon as a node completes a chunk and verifies it, it becomes a server for that chunk. Incoming TCP connections are handled by a lightweight ServerSocket with one virtual thread per client. No thread pool sizing — thousands of concurrent clients are routine.
+- Existing chunks are rehashed
+- Valid chunks are marked complete
+- Missing chunks continue downloading
 
-## Why Java 25 & Virtual Threads?
+No separate metadata database is required.
 
-**Traditional threading (OS threads):**
-- Each thread ~1 MB stack
-- 10,000 concurrent downloads = 10 GB overhead + kernel scheduling tax
-- Impractical
+5. Peer Promotion
 
-**Virtual threads (Project Loom):**
-- Each thread ~1 KB stack
-- 10,000 concurrent downloads = 10 MB overhead, no kernel overhead
-- Blocking I/O (socket.read(), channel.write()) parks the virtual thread, freeing the carrier OS thread for other work
-- Write natural blocking code; Loom handles scheduling
+The moment a chunk is verified, the peer can begin serving it to others.
 
-Result: **Simple, readable concurrent code at massive scale.**
+---
 
-## Quick Start
+Why Java 25 & Virtual Threads?
 
-### Prerequisites
+Traditional thread-per-connection designs become expensive at scale.
+
+Virtual threads allow:
+
+- Massive concurrency
+- Natural blocking I/O
+- Minimal memory overhead
+- Simpler code than callback-based approaches
+
+This project intentionally embraces Project Loom to keep the implementation readable while remaining highly concurrent.
+
+---
+
+Quick Start
+
+Requirements
 
 - Java 25+
 - Gradle 8+
 - Linux (Ubuntu / Fedora)
 
-### Seed a File
+Seed a File
 
-```bash
 ./gradlew cli:run --args="seed --file ubuntu-25.04.iso --port 7070"
-```
 
-Output:
-```
+Example output:
+
 Listening on port 7070
 Manifest hash: e3b0c44298fc1c...
 Total chunks: 5120
-```
 
-The seeder listens indefinitely, serving chunks on request.
+Download a File
 
-### Download from Peers
-
-```bash
 ./gradlew cli:run --args="leech \
   --manifest manifest.json \
   --peer 192.168.1.10:7070 \
   --peer 192.168.1.11:7070 \
   --output ubuntu-25.04.iso"
-```
 
-Output:
-```
+Example output:
+
 Downloaded 2048 / 5120 chunks... [████░░░░░░] 40%
 Downloaded 5120 / 5120 chunks... [██████████] 100%
 Transfer complete. Verifying full file hash...
-✓ File verified. Hash: e3b0c44298fc1c...
-```
+✓ File verified.
 
-Interrupt and re-run — the download resumes from where it left off.
-
-## Architecture
-
-Clean layered design with strict dependency boundaries:
-
-```
-┌─────────────────────────────────────────────────┐
-│ CLI (seed / leech commands)                     │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│ Transfer Manager (orchestration layer)          │
-│ - Coordinates downloads                         │
-│ - Manages retry & backpressure                  │
-│ - Tracks chunk state                            │
-└──────────┬──────────────────────────┬───────────┘
-           │                          │
-   ┌───────▼──────────┐      ┌────────▼──────────┐
-   │ StorageProvider  │      │ PeerConnector    │
-   │ (interface)      │      │ (interface)      │
-   └───────┬──────────┘      └────────┬──────────┘
-           │                          │
-   ┌───────▼──────────┐      ┌────────▼──────────┐
-   │ FileChannel      │      │ TCP Networking   │
-   │ Storage          │      │ (socket-based)   │
-   └──────────────────┘      └──────────────────┘
-```
-
-**Module structure:**
-
-- **core/** — Pure Java domain model (Records, sealed types, value objects). No I/O.
-- **storage/** — FileChannel-based random-access writes + SHA-256 verification.
-- **networking/** — TCP binary framing, ServerSocket listener, async chunk fetch.
-- **transfer/** — Orchestrator: coordinates parallel downloads, state tracking, retry logic.
-- **manifest/** — Builds manifests from files, JSON serialization.
-- **cli/** — Entry points: `seed` and `leech` commands.
-
-**Key principle:** The domain never imports infrastructure. Swapping TCP for TLS or FileChannel for S3 requires zero changes to the orchestrator.
-
-## Testing
-
-### Unit Tests
-
-Test core logic with in-memory fakes — no disk, no network:
-
-```bash
-./gradlew test
-```
-
-Examples:
-- `ManifestBuilderTest` — chunk splitting, checksum computation
-- `ChunkStateTrackerTest` — state machine transitions, atomic operations
-- `TransferManagerTest` — orchestration logic with fake storage/network
-
-### Integration Tests
-
-Two-node end-to-end test on loopback:
-1. Start seeder in a background virtual thread
-2. Run leecher, download all chunks
-3. Verify output file byte-for-byte match
-
-## Phased Roadmap
-
-| Phase | Focus |
-|-------|-------|
-| **1** | Domain modeling, TDD foundations |
-| **2** | FileChannel random-access storage |
-| **3** | TCP binary framing & wire protocol |
-| **4** | Virtual thread concurrency, backpressure |
-| **5** | Multi-peer orchestration, CLI |
-| **6** | Failure recovery, exponential backoff retry |
-
-## Current Status
-
-**Phase 2 — In Progress**
-- ✅ Domain types (Records, sealed interfaces)
-- ✅ FileChannelStorage (preallocate, write, read)
-- ✅ ChecksumVerifier (SHA-256 per chunk)
-- ✅ Unit test coverage for storage layer
-- 🔄 BitSet piece map exchange
-- ⏳ Network layer (next)
-
-## Design Highlights
-
-### Binary TCP Protocol
-
-Minimal framing overhead. Messages:
-
-| Type | Purpose |
-|------|---------|
-| `0x01` | Request piece map (which chunks do you hold?) |
-| `0x02` | Respond with BitSet |
-| `0x03` | Request chunk data |
-| `0x04` | Respond with chunk bytes (or error) |
-
-Big-endian integers, length-prefixed strings. No complexity, no surprises.
-
-### State Machine (Per Chunk)
-
-```
-MISSING → SCHEDULED → IN_FLIGHT → VERIFYING → VERIFIED → WRITTEN
-                                     ↓ (hash mismatch or timeout)
-                                   MISSING (retry)
-```
-
-Transitions are atomic CAS operations — no two threads can schedule the same chunk.
-
-### Backpressure & Semaphore
-
-Without limits, 10,000 virtual threads might saturate network buffers simultaneously. A `Semaphore` caps inflight downloads (default: 32), allowing controlled resource usage:
-
-```java
-semaphore.acquireUninterruptibly();
-try {
-    downloadChunk(...);
-} finally {
-    semaphore.release();
-}
-```
-
-Virtual threads park cheaply while waiting on the semaphore — no busy-spinning.
-
-## Non-Goals (v1)
-
-- **No DHT / peer discovery** — Static peer list only. Future: mDNS or config file.
-- **No encryption** — Plain TCP. Interface boundary exists for TLS wrapper.
-- **No GUI** — CLI only.
-- **No persistence of peer state** — Manifests are ephemeral; BitSets recomputed on restart.
-
-## Building & Running
-
-```bash
-# Clone and build
-git clone <repo>
-cd swarm-share-lite
-./gradlew build
-
-# Run tests
-./gradlew test
-
-# Run CLI (see Quick Start above)
-./gradlew cli:run --args="seed --file ubuntu-25.04.iso --port 7070"
-```
+Interrupted downloads automatically resume.
 
 ---
 
-**Language:** Java 25 | **Platform:** Linux | **License:** MIT
+Architecture
+
+CLI
+ │
+ ▼
+Transfer Manager
+ ├── StorageProvider
+ └── PeerConnector
+      │
+      ▼
+   TCP Network
+
+Modules
+
+Module| Responsibility
+"core"| Domain model and business rules
+"manifest"| Manifest generation and serialization
+"storage"| File storage and checksum validation
+"networking"| TCP communication and protocol framing
+"transfer"| Download orchestration and scheduling
+"cli"| Command-line interface
+
+Design Principle
+
+The domain layer never depends on infrastructure.
+
+Examples:
+
+- TCP → TLS without changing orchestration logic
+- Local disk → S3-backed storage without changing domain code
+
+---
+
+Protocol
+
+Message Types
+
+Code| Description
+"0x01"| Request piece map
+"0x02"| Piece map response
+"0x03"| Request chunk
+"0x04"| Chunk response
+
+The protocol uses:
+
+- Binary framing
+- Big-endian integers
+- Length-prefixed fields
+
+---
+
+Chunk Lifecycle
+
+MISSING
+   │
+   ▼
+SCHEDULED
+   │
+   ▼
+IN_FLIGHT
+   │
+   ▼
+VERIFYING
+   │
+   ▼
+VERIFIED
+   │
+   ▼
+WRITTEN
+
+(hash mismatch / timeout)
+          │
+          ▼
+       MISSING
+
+---
+
+Testing
+
+Run all tests:
+
+./gradlew test
+
+Unit Tests
+
+- Manifest generation
+- Checksum verification
+- Chunk state tracking
+- Transfer orchestration
+
+Integration Tests
+
+End-to-end transfer tests verify:
+
+- Chunk exchange
+- File reconstruction
+- Hash correctness
+
+---
+
+Non-Goals (v1)
+
+- No DHT-based peer discovery
+- No encryption/TLS
+- No GUI
+- No persistent peer database
+
+---
+
+Build
+
+git clone <repo>
+cd swarm-share-lite
+
+./gradlew build
+./gradlew test
+
+---
+
+Java 25 • Virtual Threads • Linux • MIT License
