@@ -6,145 +6,192 @@ import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
 import io.swarmshare.core.port.StorageProvider;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.BitSet;
 import java.util.Optional;
 
 /**
- * Writes chunks directly to their byte offset in a pre-allocated output file.
- * Uses FileChannel for position-aware reads and writes — no sequential constraint.
- * <p>
- * Why FileChannel over FileOutputStream?
- * - FileChannel.write(buffer, position) writes at explicit offset without seeking
- * - Multiple virtual threads can write to different offsets concurrently
- * - FileOutputStream requires sequential writes; concurrent seeks need external locking
+ * Writes and reads chunks at explicit byte offsets in a pre-allocated output file.
+ *
+ * <h3>Why {@link FileChannel}?</h3>
+ * <ul>
+ *   <li>{@code FileChannel.write(buffer, position)} writes at an explicit offset atomically
+ *       without moving a shared file-pointer — no external locking needed for disjoint ranges.</li>
+ *   <li>{@code FileOutputStream} exposes only a sequential cursor; concurrent seeks require
+ *       a mutex that serialises all writes.</li>
+ *   <li>Virtual threads can block on I/O without pinning their carrier thread when using NIO
+ *       channels (JDK 21+).</li>
+ * </ul>
+ *
+ * <h3>Thread safety</h3>
+ * {@link FileChannel} guarantees atomicity for positional reads and writes at <em>distinct</em>
+ * offsets. Callers must ensure no two calls share an overlapping byte range.
  */
-public class FileChannelStorage implements StorageProvider {
+public final class FileChannelStorage implements StorageProvider, Closeable {
+
+    private static final Logger LOG = System.getLogger(FileChannelStorage.class.getName());
 
     private final Path outputPath;
     private final ChecksumVerifier verifier;
 
-    // FileChannel is thread-safe for positional I/O at different offsets
-    private FileChannel channel;
+    /**
+     * Visible to concurrent virtual threads; volatile ensures safe publication after
+     * {@link #preallocateSpace} without a full synchronised block on the happy path.
+     */
+    private volatile FileChannel channel;
 
     public FileChannelStorage(Path outputPath) {
         this.outputPath = outputPath;
         this.verifier = new ChecksumVerifier();
     }
 
+    // ── StorageProvider ──────────────────────────────────────────────────────────
+
     /**
-     * Pre-allocates output file to exact size.
-     * Allows all chunks to write to their target offsets immediately.
+     * Creates and pre-allocates the output file to exactly {@code totalSize} bytes.
+     *
+     * <p>Writing a single byte at {@code totalSize - 1} forces the OS to actually
+     * reserve the block range on disk, not just update inode metadata as
+     * {@link FileChannel#truncate} alone would on many filesystems.
+     *
+     * @param totalSize exact byte size the file must reach before any chunk is written
+     * @throws IllegalArgumentException if {@code totalSize} is non-positive
+     * @throws UncheckedIOException     if the file cannot be created or pre-allocated
      */
     @Override
     public void preallocateSpace(long totalSize) {
-        try {
-            channel = FileChannel.open(outputPath,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.READ,
-                    StandardOpenOption.WRITE);
+        if (totalSize <= 0) throw new IllegalArgumentException("totalSize must be positive, got: " + totalSize);
 
-            // truncate() sets logical size but doesn't allocate on all filesystems
+        try {
+            // Ensure parent directory exists before opening
+            Files.createDirectories(outputPath.getParent());
+
+            channel = FileChannel.open(
+                    outputPath,
+                    StandardOpenOption.CREATE_NEW,  // fail fast if file already exists
+                    StandardOpenOption.READ,
+                    StandardOpenOption.WRITE
+            );
+
+            // Sets the logical file length; sufficient on some filesystems (e.g. APFS sparse)
             channel.truncate(totalSize);
 
-            // Force allocation by writing a single byte at the end
-            // This ensures the OS reserves all totalSize bytes
-            ByteBuffer marker = ByteBuffer.allocate(1);
-            channel.write(marker, totalSize - 1);
+            // Materialise the allocation by writing one byte at the last position.
+            // This converts a sparse extent into an allocated one on ext4, NTFS, etc.
+            channel.write(ByteBuffer.allocate(1), totalSize - 1);
 
-            // Sync to disk (optional but ensures durability)
-            channel.force(false);
+            // Flush metadata + data to the storage device for durability
+            channel.force(true);
+
+            LOG.log(Level.INFO, "Pre-allocated {0} bytes at {1}", totalSize, outputPath);
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to preallocate output file", e);
+            throw new UncheckedIOException(
+                    "Failed to pre-allocate %d bytes at %s".formatted(totalSize, outputPath), e);
         }
     }
 
     /**
-     * Writes chunk data to exact byte offset.
-     * Thread-safe for concurrent writes to different offsets.
+     * Writes {@code data} at the given absolute byte {@code offset} in the file.
+     *
+     * <p>Loops until all bytes are written — {@link FileChannel#write} may perform
+     * partial writes on some OS/kernel configurations even for NIO channels.
+     *
+     * @param id     chunk identifier (used only for error reporting)
+     * @param offset absolute byte offset into the output file
+     * @param data   raw chunk bytes; must not be {@code null} or empty
+     * @throws UncheckedIOException if any write attempt fails
      */
     @Override
     public void writeChunk(ChunkId id, long offset, byte[] data) {
+        ByteBuffer buffer = ByteBuffer.wrap(data);
         try {
-            // Wrap data array without copying; reuses existing memory
-            ByteBuffer buffer = ByteBuffer.wrap(data);
-
-            // Loop handles partial writes (rare, but FileChannel contract requires it)
             while (buffer.hasRemaining()) {
-                // Write from current position to file offset
-                // Position is atomic; safe for concurrent calls at different offsets
+                // Write from buffer.position() bytes into the file at (offset + bytesWrittenSoFar).
+                // FileChannel.write() returns the number of bytes actually written this call,
+                // and advances buffer.position() by that amount automatically — so the next
+                // iteration naturally picks up where this one left off.
                 channel.write(buffer, offset + buffer.position());
             }
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to write chunk " + id.index(), e);
+            throw new UncheckedIOException(
+                    "Failed to write chunk %d (%d bytes) at offset %d".formatted(id.index(), data.length, offset), e);
         }
     }
 
     /**
-     * Reads chunk data from exact byte offset.
-     * Returns empty Optional if file is shorter than expected.
+     * Reads {@code size} bytes from absolute byte {@code offset}.
+     *
+     * @param id     chunk identifier (used only for error reporting)
+     * @param offset absolute byte offset into the output file
+     * @param size   number of bytes to read
+     * @return the chunk bytes, or {@link Optional#empty()} if the file is shorter than expected
      */
     @Override
     public Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
+        ByteBuffer buffer = ByteBuffer.allocate(size);
         try {
-            // Allocate buffer to hold exactly 'size' bytes
-            ByteBuffer buffer = ByteBuffer.allocate(size);
-            int bytesRead = 0;
-
-            // Loop until all bytes read or EOF reached
-            while (bytesRead < size) {
-                // Read from file offset; -1 signals EOF
-                int n = channel.read(buffer, offset + bytesRead);
-                if (n == -1) return Optional.empty(); // File shorter than expected
-
-                // Accumulate total bytes read
-                bytesRead += n;
+            while (buffer.hasRemaining()) {
+                int n = channel.read(buffer, offset + buffer.position());
+                if (n == -1) return Optional.empty(); // EOF before we filled the buffer
             }
-
-            // Return complete chunk as byte array
             return Optional.of(buffer.array());
         } catch (IOException e) {
-            // Return empty on any I/O error (file corruption, missing chunk, etc.)
+            LOG.log(Level.WARNING, "Failed to read chunk {0} at offset {1}: {2}",
+                    id.index(), offset, e.getMessage());
             return Optional.empty();
         }
     }
 
     /**
-     * Validates all chunks in manifest: reads each and verifies checksum.
-     * Returns BitSet with bit=1 for chunks that exist and match expected hash.
+     * Validates every chunk declared in {@code manifest}.
+     *
+     * <p>For each chunk: reads the bytes at its declared offset, then verifies the
+     * SHA-256 digest against the manifest's expected hash. Sets the corresponding bit
+     * in the returned {@link BitSet} only when <em>both</em> checks pass.
+     *
+     * @param manifest source of truth for chunk offsets, sizes, and expected hashes
+     * @return a {@link BitSet} of length {@code manifest.totalChunks()} where bit {@code i}
+     *         is {@code 1} iff chunk {@code i} exists on disk and its digest matches
      */
     @Override
     public BitSet checkExistingChunks(Manifest manifest) {
-        // Create BitSet sized for total chunk count (all bits initially 0)
         BitSet existing = new BitSet(manifest.totalChunks());
 
-        // Check each chunk declared in manifest
         for (ChunkDescriptor desc : manifest.chunks()) {
             readChunk(desc.id(), desc.offset(), desc.size())
-                    // Verify checksum matches expected SHA256
                     .filter(data -> verifier.verify(data, desc.sha256()))
-                    // If both read and checksum succeeded, mark as existing
                     .ifPresent(_ -> existing.set(desc.id().index()));
         }
 
-        // Return bitmap: 1 = valid chunk exists, 0 = missing or corrupted
         return existing;
     }
 
+    // ── Closeable ────────────────────────────────────────────────────────────────
+
     /**
-     * Closes file channel; swallows exceptions (safe for cleanup).
+     * Closes the underlying {@link FileChannel}.
+     *
+     * <p>Idempotent — safe to call more than once. Exceptions during close are logged
+     * but not propagated; the channel is unusable regardless of whether {@code close()}
+     * itself throws.
      */
+    @Override
     public void close() {
+        FileChannel ch = channel;
+        if (ch == null || !ch.isOpen()) return;
         try {
-            // Close channel if open; no-op if already null
-            if (channel != null) channel.close();
+            ch.close();
         } catch (IOException e) {
-            // Swallow on close (log if instrumented; don't propagate)
+            LOG.log(Level.WARNING, "Failed to close FileChannel for {0}: {1}", outputPath, e.getMessage());
         }
     }
 }
