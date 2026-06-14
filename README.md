@@ -82,7 +82,7 @@ The moment a chunk is verified and written, the node begins serving it to others
 
 ## Quick Start
 
-**Requirements:** Java 25+, Gradle 8+, Linux (Ubuntu / Fedora)
+**Requirements:** Java 25+, Gradle 9+
 
 ### Seed a file
 
@@ -272,4 +272,4 @@ cd swarm-share-lite
 
 ---
 
-**Java 25 · Virtual Threads · Project Loom · Linux · MIT License**
+**Java 25 · Virtual Threads · Project Loom · MIT License**
