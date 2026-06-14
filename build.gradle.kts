@@ -20,9 +20,9 @@ subprojects {
     }
 
     dependencies {
-        testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
+        testImplementation("org.junit.jupiter:junit-jupiter:6.1.0")
         testImplementation("org.assertj:assertj-core:3.27.7")
-        testImplementation("org.mockito:mockito-core:5.14.2")
+        testImplementation("org.mockito:mockito-core:5.23.0")
         testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     }
 
@@ -45,6 +45,6 @@ project(":cli")         { dependencies {
     implementation(project(":storage"))
     implementation(project(":networking"))
     implementation(project(":transfer"))
-    implementation("info.picocli:picocli:4.7.6")
+    implementation("info.picocli:picocli:4.7.7")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.1")
 } }
