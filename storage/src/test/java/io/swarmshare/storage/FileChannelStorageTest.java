@@ -29,11 +29,11 @@ import static org.mockito.Mockito.when;
  *
  * <p>Coverage targets:
  * <ul>
- *   <li>{@code preallocateSpace} — file created, exact size, idempotency / rejection of zero</li>
- *   <li>{@code writeChunk} — bytes land at the correct offset, adjacent chunks don't bleed</li>
- *   <li>{@code readChunk} — round-trip fidelity, EOF sentinel for out-of-bounds reads</li>
- *   <li>{@code checkExistingChunks} — BitSet reflects valid vs. corrupted vs. missing chunks</li>
- *   <li>{@code close} — idempotent, channel closed after try-with-resources</li>
+ * <li>{@code preallocateSpace} — file created, exact size, idempotency / rejection of zero</li>
+ * <li>{@code writeChunk} — bytes land at the correct offset, adjacent chunks don't bleed</li>
+ * <li>{@code readChunk} — round-trip fidelity, EOF sentinel for out-of-bounds reads</li>
+ * <li>{@code checkExistingChunks} — BitSet reflects valid vs. corrupted vs. missing chunks</li>
+ * <li>{@code close} — idempotent, channel closed after try-with-resources</li>
  * </ul>
  */
 class FileChannelStorageTest {
@@ -279,7 +279,11 @@ class FileChannelStorageTest {
 
     private static ChunkDescriptor chunkDescriptor(int index, long offset, int size, String sha256) {
         ChunkDescriptor desc = mock(ChunkDescriptor.class);
-        when(desc.id()).thenReturn(chunkId(index));
+        
+        // BUG FIX: Isolate the nested mock creation before passing it to thenReturn()
+        ChunkId resolvedId = chunkId(index); 
+        
+        when(desc.id()).thenReturn(resolvedId);
         when(desc.offset()).thenReturn(offset);
         when(desc.size()).thenReturn(size);
         when(desc.sha256()).thenReturn(sha256);
