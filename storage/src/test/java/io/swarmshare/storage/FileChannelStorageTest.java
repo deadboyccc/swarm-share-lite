@@ -1,5 +1,6 @@
 package io.swarmshare.storage;
 
+import io.swarmshare.core.crypto.Sha256;
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
@@ -43,7 +44,7 @@ class FileChannelStorageTest {
 
     private Path testFile;
     private FileChannelStorage storage;
-    private final ChecksumVerifier verifier = new ChecksumVerifier();
+    private final Sha256 verifier = new Sha256();
 
     @BeforeEach
     void setUp() {

@@ -1,5 +1,4 @@
-// storage/ChecksumVerifier.java
-package io.swarmshare.storage;
+package io.swarmshare.core.crypto;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -20,7 +19,7 @@ import java.util.HexFormat;
  * that prevents timing side-channels that {@code String.equals} or {@code equalsIgnoreCase}
  * would expose.
  */
-public final class ChecksumVerifier {
+public final class Sha256 implements HasherPort {
 
     private static final String ALGORITHM = "SHA-256";
     private static final HexFormat HEX = HexFormat.of();
@@ -31,6 +30,7 @@ public final class ChecksumVerifier {
      * @param data raw bytes to hash; must not be {@code null}
      * @return lowercase hex-encoded SHA-256 digest (64 characters)
      */
+    @Override
     public String compute(byte[] data) {
         return HEX.formatHex(digest(data));
     }
@@ -43,6 +43,7 @@ public final class ChecksumVerifier {
      * @param expectedHex expected SHA-256 hex string; {@code null} or blank always returns false
      * @return {@code true} iff the computed digest matches the expected hash
      */
+    @Override
     public boolean verify(byte[] data, String expectedHex) {
         if (expectedHex == null || expectedHex.isBlank()) return false;
 

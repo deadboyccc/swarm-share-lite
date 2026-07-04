@@ -1,7 +1,7 @@
 // manifest/ManifestBuilderTest.java
 package io.swarmshare.manifest;
 
-import io.swarmshare.core.crypto.JdkChecksumVerifier;
+import io.swarmshare.core.crypto.Sha256;
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.Manifest;
 import org.junit.jupiter.api.Test;
@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ManifestBuilderTest {
 
-    private final JdkChecksumVerifier verifier = new JdkChecksumVerifier();
+    private final Sha256 verifier = new Sha256();
     @TempDir
     Path tempDir;
 

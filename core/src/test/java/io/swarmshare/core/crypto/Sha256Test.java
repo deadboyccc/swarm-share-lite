@@ -1,4 +1,4 @@
-package io.swarmshare.storage;
+package io.swarmshare.core.crypto;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -13,30 +13,15 @@ import java.util.concurrent.CountDownLatch;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Unit tests for {@link ChecksumVerifier}.
- *
- * <p>Coverage targets:
- * <ul>
- * <li>Correctness — known SHA-256 vectors (NIST / RFC-standard inputs)</li>
- * <li>Edge inputs — empty array, null/blank/malformed expected hash</li>
- * <li>Case insensitivity — uppercase hex in expectedHash accepted</li>
- * <li>Virtual-thread safety — concurrent compute() calls produce stable results</li>
- * </ul>
- *
- * <p>The implementation is stateless (no {@code ThreadLocal}), so there is no
- * thread-local state to corrupt; the concurrency test validates that the
- * per-call {@link java.security.MessageDigest} allocation is truly isolated.
+ * Unit tests for {@link Sha256} moved from storage to core.
  */
-class ChecksumVerifierTest {
+class Sha256Test {
 
     // Single shared instance — stateless, safe across all tests and threads
-    private final ChecksumVerifier verifier = new ChecksumVerifier();
-
-    // ── compute() ────────────────────────────────────────────────────────────────
+    private final Sha256 verifier = new Sha256();
 
     @Test
     void compute_knownInput_returnsStandardSha256() {
-        // "hello world" → well-known NIST/RFC-verifiable digest
         byte[] input = bytes("hello world");
 
         assertThat(verifier.compute(input))
@@ -45,29 +30,24 @@ class ChecksumVerifierTest {
 
     @Test
     void compute_emptyArray_returnsEmptySha256() {
-        // SHA-256("") is standardised; verifies the MessageDigest is always reset-clean
         assertThat(verifier.compute(new byte[0]))
                 .isEqualTo("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 
     @Test
     void compute_sameInputTwice_returnsSameHash() {
-        // Stateless design must produce identical output for identical input on every call
         byte[] input = bytes("idempotency-check");
-
         assertThat(verifier.compute(input)).isEqualTo(verifier.compute(input));
     }
 
     @Test
     void compute_distinctInputs_returnDistinctHashes() {
-        // Collision sanity — different payloads must not produce the same digest
         assertThat(verifier.compute(bytes("chunk-A")))
                 .isNotEqualTo(verifier.compute(bytes("chunk-B")));
     }
 
     @Test
     void compute_returnsLowercaseHex() {
-        // Contract: output is always lowercase hex (64 chars, no uppercase)
         String hash = verifier.compute(bytes("case-check"));
 
         assertThat(hash)
@@ -75,8 +55,6 @@ class ChecksumVerifierTest {
                 .as("must be lowercase hex")
                 .matches("[0-9a-f]+");
     }
-
-    // ── verify() — happy path ────────────────────────────────────────────────────
 
     @Test
     void verify_correctHash_returnsTrue() {
@@ -88,7 +66,6 @@ class ChecksumVerifierTest {
 
     @Test
     void verify_upperCaseHash_returnsTrue() {
-        // Contract: case-insensitive — uppercase hex from external manifests must be accepted
         byte[] input = bytes("test-case");
         String lower = verifier.compute(input);
 
@@ -99,7 +76,6 @@ class ChecksumVerifierTest {
     void verify_mixedCaseHash_returnsTrue() {
         byte[] input = bytes("mixed-case-hex");
         String lower = verifier.compute(input);
-        // Alternate upper/lower chars
         StringBuilder mixed = new StringBuilder();
         for (int i = 0; i < lower.length(); i++) {
             mixed.append(i % 2 == 0 ? Character.toUpperCase(lower.charAt(i)) : lower.charAt(i));
@@ -107,8 +83,6 @@ class ChecksumVerifierTest {
 
         assertThat(verifier.verify(input, mixed.toString())).isTrue();
     }
-
-    // ── verify() — rejection cases ───────────────────────────────────────────────
 
     @Test
     void verify_wrongHash_returnsFalse() {
@@ -120,7 +94,6 @@ class ChecksumVerifierTest {
 
     @Test
     void verify_differentData_sameHash_returnsFalse() {
-        // Verifying different data against a hash computed from different data must fail
         byte[] original = bytes("original-data");
         byte[] tampered = bytes("tampered-data");
         String originalHash = verifier.compute(original);
@@ -138,21 +111,16 @@ class ChecksumVerifierTest {
     @ParameterizedTest(name = "verify rejects malformed hex [{0}]")
     @ValueSource(strings = {
             "not-hex-at-all",
-            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", // 64 non-hex chars
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde",  // 63 chars (odd length)
-            "b94d27b9 934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9" // space inside
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde",
+            "b94d27b9 934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     })
     void verify_malformedHex_returnsFalse(String malformedHash) {
-        // Must not throw — malformed input is a data error, not a programming error
         assertThat(verifier.verify(bytes("any-data"), malformedHash)).isFalse();
     }
 
-    // ── concurrency ──────────────────────────────────────────────────────────────
-
     @Test
     void compute_concurrentVirtualThreads_allProduceCorrectHashes() throws InterruptedException {
-        // Verify that per-call MessageDigest allocation is truly isolated:
-        // 300 virtual threads each hashing their own payload must never cross-contaminate.
         record Payload(byte[] data, String expected) {}
 
         List<Payload> payloads = List.of(
@@ -162,14 +130,14 @@ class ChecksumVerifierTest {
         );
 
         int iterations = 200;
-        CountDownLatch startGate = new CountDownLatch(1); // all threads start simultaneously
+        CountDownLatch startGate = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(payloads.size());
         List<AssertionError> failures = new ArrayList<>();
 
         for (Payload payload : payloads) {
             Thread.ofVirtual().start(() -> {
                 try {
-                    startGate.await(); // wait for all threads to be ready
+                    startGate.await();
                     for (int i = 0; i < iterations; i++) {
                         String actual = verifier.compute(payload.data());
                         if (!actual.equals(payload.expected())) {
@@ -188,13 +156,11 @@ class ChecksumVerifierTest {
             });
         }
 
-        startGate.countDown(); // release all threads at once
+        startGate.countDown();
         doneLatch.await();
 
         assertThat(failures).as("concurrent hash computation produced incorrect results").isEmpty();
     }
-
-    // ── helpers ──────────────────────────────────────────────────────────────────
 
     private static byte[] bytes(String s) {
         return s.getBytes(StandardCharsets.UTF_8);

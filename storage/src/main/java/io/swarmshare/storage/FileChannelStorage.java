@@ -1,6 +1,8 @@
 // storage/FileChannelStorage.java
 package io.swarmshare.storage;
 
+import io.swarmshare.core.crypto.HasherPort;
+import io.swarmshare.core.crypto.Sha256;
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
@@ -41,7 +43,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     private static final Logger LOG = System.getLogger(FileChannelStorage.class.getName());
 
     private final Path outputPath;
-    private final ChecksumVerifier verifier;
+    private final HasherPort verifier;
 
     /**
      * Visible to concurrent virtual threads; volatile ensures safe publication after
@@ -51,7 +53,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
 
     public FileChannelStorage(Path outputPath) {
         this.outputPath = outputPath;
-        this.verifier = new ChecksumVerifier();
+        this.verifier = new Sha256();
     }
 
     // ── StorageProvider ──────────────────────────────────────────────────────────
