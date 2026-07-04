@@ -87,8 +87,8 @@ public final class ManifestValidator {
                 out.add("chunk %d has id.index()=%d (expected %d)".formatted(i, desc.id().index(), i));
             }
 
-            // ChunkId must reference this manifest
-            if (!manifest.fileHash().equals(desc.id().manifestHash())) {
+            // ChunkId must reference this manifest; skip check if manifest.fileHash is blank
+            if (!isBlank(manifest.fileHash()) && !manifest.fileHash().equals(desc.id().manifestHash())) {
                 out.add("chunk %d has manifestHash='%s' but manifest.fileHash='%s'"
                         .formatted(i, desc.id().manifestHash(), manifest.fileHash()));
             }

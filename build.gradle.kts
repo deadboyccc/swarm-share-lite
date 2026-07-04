@@ -32,7 +32,7 @@ subprojects {
 }
 
 // Hexagonal Boundary Graph: Infrastructure modules explicitly depend on core ports
-project(":manifest")    { dependencies { implementation(project(":core")) } }
+project(":manifest") { dependencies { implementation(project(":core")); implementation("com.fasterxml.jackson.core:jackson-databind:2.22.0") } }
 project(":storage")     { dependencies { implementation(project(":core")) } }
 project(":networking")  { dependencies { implementation(project(":core")) } }
 project(":transfer")    { dependencies {

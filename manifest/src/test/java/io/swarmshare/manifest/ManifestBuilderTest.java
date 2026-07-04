@@ -1,9 +1,9 @@
 // manifest/ManifestBuilderTest.java
 package io.swarmshare.manifest;
 
+import io.swarmshare.core.crypto.JdkChecksumVerifier;
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.Manifest;
-import io.swarmshare.storage.ChecksumVerifier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ManifestBuilderTest {
 
-    private final ChecksumVerifier verifier = new ChecksumVerifier();
+    private final JdkChecksumVerifier verifier = new JdkChecksumVerifier();
     @TempDir
     Path tempDir;
 
@@ -192,11 +192,11 @@ class ManifestBuilderTest {
         Manifest manifest = new ManifestBuilder(2).build(file);
 
         assertThat(manifest.chunks().get(0).sha256())
-                .isEqualTo("aa8e4095784caaf34c2ffd89ba109a21c1f0db97fa1da76a6e4f6f658ebc1305");
-        // "C" (0x43) → sha256 = 82ff4453ce2b82685fcb154c3480023b5844b832c7cf4684fa928b96a78ec1b6
+                .isEqualTo("38164fbd17603d73f696b8b4d72664d735bb6a7c88577687fd2ae33fd6964153");
+        // "C" (0x43)
         // verified: printf '\x43' | sha256sum
         assertThat(manifest.chunks().get(1).sha256())
-                .isEqualTo("82ff4453ce2b82685fcb154c3480023b5844b832c7cf4684fa928b96a78ec1b6");
+                .isEqualTo("6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d");
     }
 
     @Test
@@ -243,7 +243,7 @@ class ManifestBuilderTest {
         Manifest manifest = new ManifestBuilder(1).build(file);
 
         assertThat(manifest.fileHash())
-                .isEqualTo("aa8e4095784caaf34c2ffd89ba109a21c1f0db97fa1da76a6e4f6f658ebc1305");
+                .isEqualTo("38164fbd17603d73f696b8b4d72664d735bb6a7c88577687fd2ae33fd6964153");
     }
 
     @Test

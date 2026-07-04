@@ -1,6 +1,8 @@
 // manifest/ManifestBuilder.java
 package io.swarmshare.manifest;
 
+import io.swarmshare.core.crypto.ChecksumVerifierPort;
+import io.swarmshare.core.crypto.JdkChecksumVerifier;
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
@@ -55,7 +57,7 @@ public final class ManifestBuilder {
     private static final HexFormat HEX = HexFormat.of();
 
     private final int chunkSize;
-    private final ChecksumVerifier verifier;
+    private final ChecksumVerifierPort verifier;
 
     /**
      * Creates a builder that splits files into chunks of {@code chunkSize} bytes.
@@ -63,11 +65,15 @@ public final class ManifestBuilder {
      * @param chunkSize number of bytes per chunk; must be {@code >= 1}
      * @throws IllegalArgumentException if {@code chunkSize < 1}
      */
-    public ManifestBuilder(int chunkSize) {
+    public ManifestBuilder(int chunkSize, ChecksumVerifierPort verifier) {
         if (chunkSize < 1) throw new IllegalArgumentException(
                 "chunkSize must be >= 1, got: " + chunkSize);
         this.chunkSize = chunkSize;
-        this.verifier = new ChecksumVerifier();
+        this.verifier = verifier;
+    }
+
+    public ManifestBuilder(int chunkSize) {
+        this(chunkSize, new JdkChecksumVerifier());
     }
 
     /**
