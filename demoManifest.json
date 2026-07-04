@@ -1,0 +1,68 @@
+{
+  "fileHash": "1ce251bb506e10558235cf3feade0c868b215d47bd9c18523c58737db433f5fd",
+  "fileName": "f.bin",
+  "totalSize": 10485760,
+  "chunkSize": 1048576,
+  "chunks": [
+    {
+      "index": 0,
+      "offset": 0,
+      "size": 1048576,
+      "sha256": "c20cd2e6df572f5ececbb5c3687e330c3fc7f66c76c039978156be2f0461ba11"
+    },
+    {
+      "index": 1,
+      "offset": 1048576,
+      "size": 1048576,
+      "sha256": "e05b6fb5dfeface66e37fe31064df7110117cea00d17e76bf3c4627009ff966a"
+    },
+    {
+      "index": 2,
+      "offset": 2097152,
+      "size": 1048576,
+      "sha256": "73e3b8b6ff183d9710a3ad65299a1ff48e0533df0983e5d3ef39e0bf4c86aa65"
+    },
+    {
+      "index": 3,
+      "offset": 3145728,
+      "size": 1048576,
+      "sha256": "6ff07e10ee6ba3085f513ee3ec600a10bf4490ab5fe27f74f255a25dd14005fb"
+    },
+    {
+      "index": 4,
+      "offset": 4194304,
+      "size": 1048576,
+      "sha256": "6a9621e85e4f12dc7f4f6a3d465988cd74d4882dd8db4611c417da32768e86a1"
+    },
+    {
+      "index": 5,
+      "offset": 5242880,
+      "size": 1048576,
+      "sha256": "a054d33b690e49d322ea32b3f787ad203bf985f93a570005e5b7293479f1f0c8"
+    },
+    {
+      "index": 6,
+      "offset": 6291456,
+      "size": 1048576,
+      "sha256": "46f363f58257cb87add874606664c4e937dffcbcc83cbd698248e6109dc04fb4"
+    },
+    {
+      "index": 7,
+      "offset": 7340032,
+      "size": 1048576,
+      "sha256": "f47d140b4670b8a852724f9ceba8fd3323dd3c2ea8dce5ead97634ebf8b1f435"
+    },
+    {
+      "index": 8,
+      "offset": 8388608,
+      "size": 1048576,
+      "sha256": "1ef923895fa811f3d0c5bbde0ee82f696766561e6085ff83a3806d33445d13b5"
+    },
+    {
+      "index": 9,
+      "offset": 9437184,
+      "size": 1048576,
+      "sha256": "583bda17741921a0e97d12c1b72fccfb451f3e5e0036f5bf17c9f8e73def1b96"
+    }
+  ]
+}
