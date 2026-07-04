@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ManifestBuilderTest {
 
-    private final Sha256 verifier = new Sha256();
+    private final Sha256 sha256 = new Sha256();
     @TempDir
     Path tempDir;
 
@@ -207,7 +207,7 @@ class ManifestBuilderTest {
 
         Manifest manifest = new ManifestBuilder(100).build(file);
 
-        String expected = verifier.compute(content);
+        String expected = sha256.compute(content);
         assertThat(manifest.chunks().get(0).sha256()).isEqualTo(expected);
     }
 
@@ -229,7 +229,7 @@ class ManifestBuilderTest {
 
             assertThat(desc.sha256())
                     .as("hash of chunk %d", desc.id().index())
-                    .isEqualTo(verifier.compute(chunkBytes));
+                    .isEqualTo(sha256.compute(chunkBytes));
         }
     }
 
@@ -261,7 +261,7 @@ class ManifestBuilderTest {
         Manifest manifest = new ManifestBuilder(1).build(file); // 2 chunks: "A", "B"
 
         // Independently compute correct fileHash (SHA-256 of "AB"):
-        String correctFileHash = verifier.compute(content);
+        String correctFileHash = sha256.compute(content);
         assertThat(manifest.fileHash()).isEqualTo(correctFileHash);
     }
 
@@ -274,7 +274,7 @@ class ManifestBuilderTest {
 
         Manifest manifest = new ManifestBuilder(100).build(file);
 
-        assertThat(manifest.fileHash()).isEqualTo(verifier.compute(content));
+        assertThat(manifest.fileHash()).isEqualTo(sha256.compute(content));
     }
 
     @Test

@@ -177,7 +177,7 @@ public final class ManifestBuilder {
             index++;
         }
 
-        // Finalise whole-file hash now that all bytes have been fed
+        // Finalize whole-file hash now that all bytes have been fed
         String fileHash = HEX.formatHex(fileDigest.digest());
 
         // Promote PendingChunkMeta → ChunkDescriptor now that fileHash is known
