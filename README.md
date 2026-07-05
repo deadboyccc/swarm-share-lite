@@ -39,7 +39,7 @@ Total: ~35 GB transferred (mostly in parallel)
 
 ### 1 — Manifest creation
 
-The seeder splits the file into fixed-size chunks (default 1 MB) and produces a manifest — the shared contract all peers use to participate:
+The seeder splits the file into fixed-size chunks (default 1 MB) and produces a manifest — the shared contract all peers use to participate. The manifest is written to disk as `<file>.manifest.json` alongside the source file, so it can be handed to leechers by any means (scp, USB, a shared folder, etc.) before a download begins:
 
 ```json
 {
@@ -95,14 +95,18 @@ All tests pass, including end-to-end networking tests.
 
 ### CLI Commands
 
-The CLI is the entry point for seeding and provides utilities for manifest inspection:
+The CLI is built on [picocli](https://picocli.info/) and exposes three subcommands: `seed`, `build-manifest`, and `download`. Run with no arguments, or with `--help`, to see full usage for any command:
+
+```bash
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main --help
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main seed --help
+```
 
 #### Seed a file
 
-Start a seeder that listens on port 7070 and serves all chunks:
+Start a seeder that builds a manifest, writes it to `<file>.manifest.json`, and listens on the given port to serve all chunks:
 
 ```bash
-# Build manifest and start listening
 java -cp cli/build/classes/java/main io.swarmshare.cli.Main seed <filepath> <port>
 
 # Example
@@ -111,21 +115,27 @@ java -cp cli/build/classes/java/main io.swarmshare.cli.Main seed /tmp/ubuntu-25.
 
 Output:
 ```
+Manifest written to /tmp/ubuntu-25.04.iso.manifest.json
 Seeder running. fileHash=e3b0c44298fc1c7149efe3e05d7734f... port=7070
 ```
 
+The seeder blocks and keeps serving until interrupted (Ctrl+C).
+
 #### Build a manifest
 
-Compute and display the manifest for a file without serving it:
+Compute, print, and persist a manifest for a file without serving it. Useful when you want to generate the manifest ahead of time, or distribute it separately from starting the seeder:
 
 ```bash
-java -cp cli/build/classes/java/main io.swarmshare.cli.Main build-manifest <filepath> [chunkSize]
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main build-manifest <filepath> [chunkSize] [-o outputPath]
 
-# Example with default 1 MB chunks
+# Example with default 1 MB chunks — writes ubuntu-25.04.iso.manifest.json
 java -cp cli/build/classes/java/main io.swarmshare.cli.Main build-manifest /tmp/ubuntu-25.04.iso
 
 # Example with custom chunk size (512 KB)
 java -cp cli/build/classes/java/main io.swarmshare.cli.Main build-manifest /tmp/ubuntu-25.04.iso 524288
+
+# Example writing the manifest to a custom path
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main build-manifest /tmp/ubuntu-25.04.iso -o /tmp/shared/manifest.json
 ```
 
 Output:
@@ -135,6 +145,44 @@ fileName=ubuntu-25.04.iso
 totalSize=5368709120
 chunkSize=1048576
 totalChunks=5120
+manifestPath=/tmp/ubuntu-25.04.iso.manifest.json
+```
+
+#### Download a file
+
+Fetch a file from one or more peers, using a manifest produced by `seed` or `build-manifest`:
+
+```bash
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main download <manifestFile> <output> <peerHost:peerPort>...
+
+# Example: download from a single seeder
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main download \
+    ubuntu-25.04.iso.manifest.json /tmp/ubuntu-25.04.iso 192.168.1.10:7070
+
+# Example: download from multiple peers at once
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main download \
+    ubuntu-25.04.iso.manifest.json /tmp/ubuntu-25.04.iso 192.168.1.10:7070 192.168.1.11:7070
+```
+
+Output:
+```
+Downloading ubuntu-25.04.iso (5120 chunks) from 2 peer(s)...
+Download complete: /tmp/ubuntu-25.04.iso
+```
+
+`download` blocks until every chunk has been fetched, verified, and written, or throws if chunks remain unreachable after retries. If `output` already has partial or complete data on disk (e.g. a retried download), matching chunks are verified and skipped rather than re-fetched — see [Resume support](#4--resume-support).
+
+#### End-to-end example
+
+```bash
+# Machine A — seed the file
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main seed /tmp/ubuntu.iso 7070
+
+# Copy /tmp/ubuntu.iso.manifest.json to Machine B (scp, USB, shared folder, etc.)
+
+# Machine B — download using that manifest and Machine A's address
+java -cp cli/build/classes/java/main io.swarmshare.cli.Main download \
+    ubuntu.iso.manifest.json /tmp/ubuntu.iso 192.168.1.10:7070
 ```
 
 ### Programmatic Usage
@@ -143,7 +191,7 @@ The orchestrator is designed to be integrated into larger applications. Use `Tra
 
 ```java
 import io.swarmshare.core.domain.Manifest;
-import io.swarmshare.manifest.ManifestBuilder;
+import io.swarmshare.manifest.ManifestSerializer;
 import io.swarmshare.networking.TcpPeerConnector;
 import io.swarmshare.storage.FileChannelStorage;
 import io.swarmshare.transfer.TransferManager;
@@ -154,7 +202,7 @@ List<PeerInfo> peers = List.of(
     new PeerInfo(UUID.randomUUID(), new InetSocketAddress("192.168.1.11", 7070))
 );
 
-Manifest manifest = loadManifestFromJson(manifestFile);
+Manifest manifest = new ManifestSerializer().read(manifestFile);
 var storage = new FileChannelStorage(Path.of("output.iso"));
 var connector = new TcpPeerConnector();
 var manager = new TransferManager(manifest, peers, storage, connector);
@@ -214,9 +262,18 @@ This project is structured as a **Gradle multi-module build** with a strict depe
 | **storage** | File I/O via `FileChannel`, SHA-256 verification | `FileChannelStorage` |
 | **networking** | TCP binary protocol, chunk fetching, peer serving | `FrameEncoder`, `FrameDecoder`, `TcpPeerConnector`, `TcpChunkServer` |
 | **transfer** | Orchestration, concurrency control, retry logic | `TransferManager`, `ChunkStateTracker`, `RetryPolicy` |
-| **cli** | User-facing commands for operations | `Main`, `SeederFileStorage` |
+| **cli** | User-facing commands for operations | `Main` (picocli subcommands: `seed`, `build-manifest`, `download`) |
 
 **Design principle:** The domain (`core`) layer has zero dependencies on I/O or frameworks. This keeps business logic testable and portable — swapping TCP for TLS or `FileChannel` for S3 requires changes only in `networking` and `storage`, never in `transfer` or `core`.
+
+**CLI dependency:** The `cli` module depends on [picocli](https://picocli.info/) for argument parsing, `--help` generation, and subcommand dispatch. Add it to `cli/build.gradle`:
+
+```gradle
+dependencies {
+    implementation 'info.picocli:picocli:4.7.6'
+    annotationProcessor 'info.picocli:picocli-codegen:4.7.6' // optional, for GraalVM/native-image metadata
+}
+```
 
 ---
 
@@ -269,6 +326,13 @@ Tests are organized by concern:
 3. Add testable configuration (poolSize, timeout) to the constructor
 4. Document concurrency assumptions in the class Javadoc
 
+**Example:** Adding a new CLI subcommand
+
+1. Add a `static final class` implementing `Callable<Integer>` inside `Main`, annotated with `@Command(name = "...")`
+2. Register it in the `subcommands = { ... }` array on the top-level `@Command`
+3. Bind arguments with `@Parameters` (positional) or `@Option` (flags like `-o`/`--output`)
+4. picocli handles `--help`, usage text, and type conversion — no manual `args[]` parsing needed
+
 ### Code Style & Standards
 
 This project follows the standards in `AGENTS.md`:
@@ -288,7 +352,7 @@ This project follows the standards in `AGENTS.md`:
 Orchestration ← (transfer module)
    Transfer depends on but never exposes:
 - Infrastructure (networking, storage)
-- Frameworks (Jackson, Gradle)
+- Frameworks (Jackson, Gradle, picocli)
 
 Networking and Storage depend on domain
 but are independent of each other
@@ -371,7 +435,7 @@ Virtual threads park cheaply while waiting on the semaphore — no busy-spinning
 
 ## Current Status
 
-**Phase 5 — Complete Implementation (Production-Grade)**
+**Phase 6 — Complete Implementation with Full CLI**
 
 | | Item |
 |---|---|
@@ -388,12 +452,13 @@ Virtual threads park cheaply while waiting on the semaphore — no busy-spinning
 | ✅ | `ChunkStateTracker`: atomic state transitions via CAS |
 | ✅ | `RetryPolicy`: exponential backoff with virtual thread sleep |
 | ✅ | Integration tests: two-node end-to-end over loopback TCP |
-| ✅ | CLI: `seed` and `build-manifest` commands |
+| ✅ | CLI (picocli): `seed`, `build-manifest`, and `download` commands |
+| ✅ | Manifest persistence: `seed` and `build-manifest` write `<file>.manifest.json` |
 | ✅ | Comprehensive Javadoc and inline documentation |
 
 ### Reality
 
-This is a **production-grade reference implementation** of a P2P chunk-based file distribution system. Every layer is tested, documented, and idiomatic modern Java 25.
+This is a **production-grade reference implementation** of a P2P chunk-based file distribution system. Every layer is tested, documented, and idiomatic modern Java 25. The CLI now supports the full seed → distribute manifest → download loop end-to-end.
 
 ---
 
@@ -445,7 +510,7 @@ All three extensions plug in via **interface boundaries** — no changes to core
 
 ## Non-Goals (v1)
 
-- **No DHT / peer discovery** — static peer list only; future: mDNS or config file
+- **No DHT / peer discovery** — static peer list only, supplied as `host:port` arguments to `download`; future: mDNS or config file
 - **No encryption** — plain TCP; interface boundary exists for a TLS wrapper
 - **No GUI** — CLI only
 - **No persistent peer state** — manifests are ephemeral; BitSets recomputed on restart
