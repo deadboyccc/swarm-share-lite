@@ -32,11 +32,25 @@ public final class TcpChunkServer implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(TcpChunkServer.class.getName());
 
+    /**
+     * TCP port this server binds to on {@link #start()}.
+     */
     private final int port;
+    /**
+     * Backing storage used to read chunk bytes for outgoing chunk responses.
+     */
     private final StorageProvider storage;
+    /**
+     * Manifest describing the file being seeded (hash, chunk layout, total count).
+     */
     private final Manifest manifest;
+    /**
+     * Bitmap of chunk indices this node currently holds, used to answer piece-map requests.
+     */
     private final BitSet heldChunks;
 
+    // Assigned once start() runs; volatile so close()/localPort() on other
+    // threads see the up-to-date reference without extra synchronization.
     private volatile ServerSocket serverSocket;
     private volatile ExecutorService executor;
 
@@ -57,6 +71,9 @@ public final class TcpChunkServer implements AutoCloseable {
         LOG.log(Level.INFO, "Listening on port {0}", serverSocket.getLocalPort());
 
         try {
+            // Accept loop: runs on the calling thread; each accepted client is
+            // dispatched to its own virtual thread so a slow/stalled client can't
+            // block subsequent accepts.
             while (!Thread.currentThread().isInterrupted() && !serverSocket.isClosed()) {
                 Socket client = serverSocket.accept();
                 // Each client handled on its own virtual thread to avoid blocking carrier
@@ -64,6 +81,9 @@ public final class TcpChunkServer implements AutoCloseable {
                 executor.submit(() -> handleClient(client));
             }
         } catch (IOException e) {
+            // ServerSocket.accept() throws IOException when close() is called
+            // concurrently from another thread; treat that as a normal shutdown
+            // rather than an error, and only propagate genuine I/O failures.
             if (!serverSocket.isClosed()) {
                 throw e;
             }
@@ -81,18 +101,25 @@ public final class TcpChunkServer implements AutoCloseable {
         return ss.getLocalPort();
     }
 
+    /**
+     * Handles a single accepted connection end-to-end: reads one request,
+     * dispatches it by message type, writes one response, then lets the
+     * try-with-resources block close the socket and streams.
+     */
     private void handleClient(Socket client) {
         // Try-with-resources ensures socket and streams are closed when the method
         // exits.
         try (client;
-                var in = new DataInputStream(client.getInputStream());
-                var out = new DataOutputStream(client.getOutputStream())) {
+             var in = new DataInputStream(client.getInputStream());
+             var out = new DataOutputStream(client.getOutputStream())) {
 
             // First byte indicates message type; delegate to specific handlers.
             byte msgType = in.readByte();
             switch (msgType) {
                 case FrameEncoder.MSG_PIECE_MAP_REQUEST -> handlePieceMapRequest(in, out);
                 case FrameEncoder.MSG_CHUNK_REQUEST -> handleChunkRequest(in, out);
+                // Unknown message type: reply with an error status rather than
+                // silently dropping the connection, so the peer isn't left hanging.
                 default -> FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_ERROR, new byte[0]);
             }
         } catch (IOException e) {
@@ -101,6 +128,10 @@ public final class TcpChunkServer implements AutoCloseable {
         }
     }
 
+    /**
+     * Reads a CHUNK_REQUEST body, validates it against this server's manifest,
+     * and writes back either the chunk bytes (STATUS_OK) or STATUS_NOT_FOUND.
+     */
     private void handleChunkRequest(DataInputStream in, DataOutputStream out) throws IOException {
         var req = FrameDecoder.readChunkRequest(in);
         // Validate manifest hash first — quick rejection for wrong swarm
@@ -122,6 +153,8 @@ public final class TcpChunkServer implements AutoCloseable {
                 desc.offset(),
                 desc.size());
 
+        // storage.readChunk returns empty if the chunk isn't actually on disk yet
+        // (e.g. not downloaded/verified), even though it passed index validation above.
         if (bytes.isPresent()) {
             FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_OK, bytes.get());
         } else {
@@ -129,6 +162,10 @@ public final class TcpChunkServer implements AutoCloseable {
         }
     }
 
+    /**
+     * Reads a PIECE_MAP_REQUEST body and replies with this node's current
+     * {@link #heldChunks} bitmap, serialized as bytes.
+     */
     private void handlePieceMapRequest(DataInputStream in, DataOutputStream out) throws IOException {
         String requestedHash = FrameDecoder.readPieceMapRequest(in);
         // Return NOT_FOUND if this server's manifest does not match the request
@@ -137,12 +174,16 @@ public final class TcpChunkServer implements AutoCloseable {
             return;
         }
 
-        // heldChunks is a shared BitSet; synchronise to obtain a stable snapshot
+        // heldChunks is a shared BitSet; synchronize to obtain a stable snapshot
         synchronized (heldChunks) {
             FrameEncoder.writePieceMapResponse(out, heldChunks.toByteArray());
         }
     }
 
+    /**
+     * Stops accepting new connections and shuts down the virtual-thread executor.
+     * Safe to call multiple times or before {@link #start()} has run.
+     */
     @Override
     public void close() {
         if (serverSocket != null && !serverSocket.isClosed()) {
@@ -153,6 +194,8 @@ public final class TcpChunkServer implements AutoCloseable {
             }
         }
         if (executor != null) {
+            // shutdownNow() interrupts in-flight handleClient tasks; each one is
+            // wrapped in try-with-resources so interruption still closes sockets cleanly.
             executor.shutdownNow();
         }
     }

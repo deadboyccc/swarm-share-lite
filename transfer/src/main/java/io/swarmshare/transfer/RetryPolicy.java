@@ -12,10 +12,25 @@ import java.util.concurrent.TimeUnit;
  */
 public final class RetryPolicy {
 
+    /**
+     * Maximum number of attempts (including the first) before giving up.
+     */
     private final int maxAttempts;
+    /**
+     * Base delay used for attempt 0, before any doubling.
+     */
     private final Duration initialDelay;
+    /**
+     * Upper bound on the computed delay, regardless of how many attempts have elapsed.
+     */
     private final Duration maxDelay;
 
+    /**
+     * @param maxAttempts  total attempts allowed, must be at least 1
+     * @param initialDelay delay before the first retry (attempt 0)
+     * @param maxDelay     ceiling applied to the exponentially growing delay
+     * @throws IllegalArgumentException if {@code maxAttempts} is less than 1
+     */
     public RetryPolicy(int maxAttempts, Duration initialDelay, Duration maxDelay) {
         if (maxAttempts < 1)
             throw new IllegalArgumentException("maxAttempts must be >= 1");
@@ -33,6 +48,10 @@ public final class RetryPolicy {
         return Duration.ofMillis(Math.min(ms, maxDelay.toMillis()));
     }
 
+    /**
+     * Returns whether another attempt is allowed, given how many attempts
+     * have already been made.
+     */
     public boolean shouldRetry(int attemptsDone) {
         return attemptsDone < maxAttempts;
     }

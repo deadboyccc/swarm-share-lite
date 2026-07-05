@@ -60,6 +60,10 @@ public final class ManifestValidator {
 
     // ── checks ───────────────────────────────────────────────────────────────────
 
+    /**
+     * Checks that the manifest's required string/numeric fields are present and
+     * positive, appending a human-readable message to {@code out} for each violation.
+     */
     private static void checkRequiredStrings(Manifest manifest, List<String> out) {
         if (isBlank(manifest.fileHash())) out.add("fileHash must not be blank");
         if (isBlank(manifest.fileName())) out.add("fileName must not be blank");
@@ -67,12 +71,24 @@ public final class ManifestValidator {
         if (manifest.chunkSize() <= 0) out.add("chunkSize must be positive, got: " + manifest.chunkSize());
     }
 
+    /**
+     * Checks that the manifest has at least one chunk. Downstream checks in
+     * {@link #checkChunkConsistency} short-circuit if this fails, since there's
+     * nothing further to validate against an empty or null chunk list.
+     */
     private static void checkChunkList(Manifest manifest, List<String> out) {
         if (manifest.chunks() == null || manifest.chunks().isEmpty()) {
             out.add("manifest must contain at least one chunk");
         }
     }
 
+    /**
+     * Walks the chunk list once, checking index contiguity, manifest-hash linkage,
+     * positive size, correct running offset, and presence of a checksum for each
+     * chunk — then checks that the sum of chunk sizes matches {@code totalSize}.
+     * Skipped entirely if the chunk list is null or empty (already reported by
+     * {@link #checkChunkList}).
+     */
     private static void checkChunkConsistency(Manifest manifest, List<String> out) {
         if (manifest.chunks() == null || manifest.chunks().isEmpty()) return;
 
@@ -113,7 +129,9 @@ public final class ManifestValidator {
             observedTotalSize += Math.max(desc.size(), 0);
         }
 
-        // Only check totalSize consistency if chunk sizes themselves were all valid
+        // Only check totalSize consistency if chunk sizes themselves were all valid.
+        // Otherwise a single bad chunk size would cascade into a confusing, redundant
+        // "sum doesn't match totalSize" violation on top of the real error.
         if (out.stream().noneMatch(v -> v.contains("non-positive size"))) {
             if (observedTotalSize != manifest.totalSize()) {
                 out.add("sum of chunk sizes (%d) does not match totalSize (%d)"
@@ -122,6 +140,9 @@ public final class ManifestValidator {
         }
     }
 
+    /**
+     * Returns {@code true} if {@code s} is {@code null}, empty, or whitespace-only.
+     */
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
     }

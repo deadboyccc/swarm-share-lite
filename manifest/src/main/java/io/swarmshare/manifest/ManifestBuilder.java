@@ -56,7 +56,13 @@ public final class ManifestBuilder {
     private static final Logger LOG = System.getLogger(ManifestBuilder.class.getName());
     private static final HexFormat HEX = HexFormat.of();
 
+    /**
+     * Number of bytes per chunk, applied to every chunk except possibly the last.
+     */
     private final int chunkSize;
+    /**
+     * Hashing strategy used to compute each chunk's checksum.
+     */
     private final HasherPort verifier;
 
     /**
@@ -72,6 +78,13 @@ public final class ManifestBuilder {
         this.verifier = verifier;
     }
 
+    /**
+     * Creates a builder that splits files into chunks of {@code chunkSize} bytes,
+     * using the default SHA-256 {@link HasherPort} implementation.
+     *
+     * @param chunkSize number of bytes per chunk; must be {@code >= 1}
+     * @throws IllegalArgumentException if {@code chunkSize < 1}
+     */
     public ManifestBuilder(int chunkSize) {
         this(chunkSize, new Sha256());
     }
@@ -85,6 +98,12 @@ public final class ManifestBuilder {
 
     // ── public API ────────────────────────────────────────────────────────────────
 
+    /**
+     * Creates a fresh {@link MessageDigest} for SHA-256. Wraps the checked
+     * {@link NoSuchAlgorithmException} since SHA-256 is guaranteed to be present
+     * on any standard-compliant JVM, making the checked exception unreachable
+     * in practice.
+     */
     private static MessageDigest newSha256() {
         try {
             return MessageDigest.getInstance("SHA-256");
@@ -130,6 +149,13 @@ public final class ManifestBuilder {
     /**
      * Single-pass implementation: reads the file sequentially one chunk at a time,
      * accumulating per-chunk metadata and the whole-file digest simultaneously.
+     *
+     * @param channel   open, readable channel positioned at the start of the file
+     * @param fileName  display name recorded in the resulting manifest
+     * @param totalSize total file size in bytes, as reported by the channel
+     * @return the fully assembled manifest, with {@code fileHash} computed from
+     * every byte read during this pass
+     * @throws IOException if a read from {@code channel} fails
      */
     private Manifest buildFromChannel(FileChannel channel, String fileName, long totalSize)
             throws IOException {

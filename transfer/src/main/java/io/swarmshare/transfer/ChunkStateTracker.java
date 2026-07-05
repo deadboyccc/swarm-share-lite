@@ -16,9 +16,20 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class ChunkStateTracker {
 
+    /**
+     * Current lifecycle state of each chunk, defaulting to MISSING until initialized.
+     */
     private final ConcurrentHashMap<ChunkId, ChunkState> states = new ConcurrentHashMap<>();
+    /**
+     * Per-chunk count of failed download/verification attempts.
+     */
     private final ConcurrentHashMap<ChunkId, AtomicInteger> failureCounts = new ConcurrentHashMap<>();
 
+    /**
+     * Registers {@code id} for tracking if it isn't already, starting at
+     * {@link ChunkState#MISSING} with a zero failure count. Safe to call
+     * more than once for the same id — subsequent calls are no-ops.
+     */
     public void initialize(ChunkId id) {
         states.putIfAbsent(id, ChunkState.MISSING);
         failureCounts.putIfAbsent(id, new AtomicInteger(0));
@@ -35,14 +46,27 @@ public final class ChunkStateTracker {
         return states.replace(id, expected, next);
     }
 
+    /**
+     * Returns the current state of {@code id}, or {@link ChunkState#MISSING}
+     * if it has never been {@link #initialize(ChunkId) initialized}.
+     */
     public ChunkState getState(ChunkId id) {
         return states.getOrDefault(id, ChunkState.MISSING);
     }
 
+    /**
+     * Records a failed attempt for {@code id} and returns the updated count.
+     * Initializes the counter to zero first if this is the first failure seen
+     * for this id (e.g. if called before {@link #initialize(ChunkId)}).
+     */
     public int incrementFailure(ChunkId id) {
         return failureCounts.computeIfAbsent(id, _ -> new AtomicInteger(0)).incrementAndGet();
     }
 
+    /**
+     * Returns the number of recorded failures for {@code id}, or 0 if none have
+     * been recorded.
+     */
     public int getFailureCount(ChunkId id) {
         return failureCounts.getOrDefault(id, new AtomicInteger(0)).get();
     }

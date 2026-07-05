@@ -41,6 +41,10 @@ public final class ManifestSerializer {
 
     // ── public API ────────────────────────────────────────────────────────────────
 
+    /**
+     * Flattens a domain {@link Manifest} into its wire-format DTO, mapping each
+     * {@link ChunkDescriptor}'s nested {@link ChunkId} index into a flat {@link ChunkDto}.
+     */
     private static ManifestDto toDto(Manifest manifest) {
         List<ChunkDto> chunkDtos = manifest.chunks().stream()
                 .map(desc -> new ChunkDto(
@@ -57,6 +61,10 @@ public final class ManifestSerializer {
                 chunkDtos);
     }
 
+    /**
+     * Reconstructs a domain {@link Manifest} from its wire-format DTO, rebuilding
+     * each chunk's {@link ChunkId} from the DTO's flat {@code fileHash} + {@code index}.
+     */
     private static Manifest fromDto(ManifestDto dto) {
         List<ChunkDescriptor> descriptors = dto.chunks().stream()
                 .map(cd -> new ChunkDescriptor(
@@ -146,6 +154,9 @@ public final class ManifestSerializer {
 
     // ── private DTO records ───────────────────────────────────────────────────────
 
+    /**
+     * Flat wire-format mirror of {@link Manifest}, used only for JSON (de)serialization.
+     */
     private record ManifestDto(
             @JsonProperty("fileHash") String fileHash,
             @JsonProperty("fileName") String fileName,
@@ -158,6 +169,9 @@ public final class ManifestSerializer {
         }  // Jackson needs an explicit creator for records with @JsonProperty
     }
 
+    /**
+     * Flat wire-format mirror of {@link ChunkDescriptor}, used only for JSON (de)serialization.
+     */
     private record ChunkDto(
             @JsonProperty("index") int index,
             @JsonProperty("offset") long offset,
