@@ -5,7 +5,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Serialises swarm wire-protocol frames to a {@link DataOutputStream}.
+ * Serializes swarm wire-protocol frames to a {@link DataOutputStream}.
  *
  * <p>All multi-byte integers use big-endian byte order, matching
  * {@link java.io.DataInputStream} / {@link java.io.DataOutputStream} defaults.

@@ -110,7 +110,7 @@ public final class TransferManager {
 
                 stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.MISSING);
                 stateTracker.incrementFailure(desc.id());
-                source = selectAlternativePeer(desc.id().index(), source, pieceMaps);
+                source = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
                 if (source == null) break;
                 stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
 
@@ -119,7 +119,7 @@ public final class TransferManager {
                         desc.id().index(), attempts, e.getMessage());
                 stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.MISSING);
                 stateTracker.incrementFailure(desc.id());
-                source = selectAlternativePeer(desc.id().index(), source, pieceMaps);
+                source = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
                 if (source == null) break;
                 stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
             } finally {
@@ -158,6 +158,23 @@ public final class TransferManager {
                 .map(Map.Entry::getKey)
                 .findFirst()
                 .orElse(null);
+    }
+
+    /**
+     * Chooses where to source a retry after a failed attempt. Prefers a peer
+     * other than the one that just failed; if none exists but the same peer
+     * still advertises the chunk, retries against it rather than giving up —
+     * a checksum mismatch or I/O error may be transient rather than a sign
+     * the peer's copy is bad.
+     */
+    private PeerInfo nextPeerAfterFailure(int chunkIndex, PeerInfo current,
+                                          Map<PeerInfo, BitSet> pieceMaps) {
+        PeerInfo alternative = selectAlternativePeer(chunkIndex, current, pieceMaps);
+        if (alternative != null) {
+            return alternative;
+        }
+        BitSet currentMap = pieceMaps.get(current);
+        return (currentMap != null && currentMap.get(chunkIndex)) ? current : null;
     }
 
     private void verifyCompleteFile() {
