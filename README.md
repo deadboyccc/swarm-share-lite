@@ -18,19 +18,20 @@ Distributing a 5 GB Linux ISO across 14 machines on a LAN:
 ```
 Seeder → Machine 2:  5 GB
 Seeder → Machine 3:  5 GB
-...repeat 12 more times
-Total: ~70 GB transferred by the seeder alone
+...repeat 11 more times
+Total: ~65 GB transferred by the seeder alone
 ```
 
 **Swarm (every completed peer becomes a source):**
 ```
-Round 1: 2 sources  → 4 machines have the file
-Round 2: 4 sources  → 8 machines have the file
-Round 3: 8 sources  → 16 machines have the file
-Total: ~20 GB transferred (mostly in parallel)
+Round 1: 1 source  → 2 machines have the file
+Round 2: 2 sources → 4 machines have the file
+Round 3: 4 sources → 8 machines have the file
+Round 4: 8 sources → all 14 machines have the file
+Total: ~35 GB transferred (mostly in parallel)
 ```
 
-**Result: 3.5× faster with 14 machines. The gap widens at 100+ nodes.**
+**Result: ~2× faster with 14 machines. The gap widens at 100+ nodes.**
 
 ---
 
@@ -297,9 +298,7 @@ Violation example: If `TransferManager` ever imports from `io.swarmshare.network
 
 ---
 
-## Binary Protocol
-
-The TCP wire format is intentionally minimal:
+## Why Virtual Threads
 
 | | OS Threads | Virtual Threads (Project Loom) |
 |---|---|---|
