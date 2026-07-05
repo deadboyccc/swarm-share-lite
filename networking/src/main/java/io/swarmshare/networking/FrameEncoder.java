@@ -7,8 +7,11 @@ import java.nio.charset.StandardCharsets;
 /**
  * Serializes swarm wire-protocol frames to a {@link DataOutputStream}.
  *
- * <p>All multi-byte integers use big-endian byte order, matching
+ * <p>
+ * All multi-byte integers use big-endian byte order, matching
  * {@link java.io.DataInputStream} / {@link java.io.DataOutputStream} defaults.
+ * The helpers are minimal and intentionally explicit about lengths to avoid
+ * ambiguity when reading from a raw TCP stream.
  */
 public final class FrameEncoder {
 
@@ -25,8 +28,9 @@ public final class FrameEncoder {
     }
 
     public static void writeChunkRequest(DataOutputStream out,
-                                         String manifestHash, int chunkIndex)
+            String manifestHash, int chunkIndex)
             throws IOException {
+        // Format: [MSG_CHUNK_REQUEST][hashLen:4][hashBytes][chunkIndex:4]
         byte[] hashBytes = manifestHash.getBytes(StandardCharsets.UTF_8);
         out.writeByte(MSG_CHUNK_REQUEST);
         out.writeInt(hashBytes.length);
@@ -37,10 +41,12 @@ public final class FrameEncoder {
 
     /**
      * Response layout: status (1) | payload length (4 BE) | payload (N).
-     * No message-type prefix — the request/response pairing is implicit on a TCP stream.
+     * No message-type prefix — the request/response pairing is implicit on a TCP
+     * stream.
      */
     public static void writeChunkResponse(DataOutputStream out, byte status, byte[] payload)
             throws IOException {
+        // Response layout: status (1) | payload length (4 BE) | payload (N).
         out.writeByte(status);
         out.writeInt(payload.length);
         if (payload.length > 0) {
@@ -51,6 +57,7 @@ public final class FrameEncoder {
 
     public static void writePieceMapRequest(DataOutputStream out, String manifestHash)
             throws IOException {
+        // Format: [MSG_PIECE_MAP_REQUEST][hashLen:4][hashBytes]
         byte[] hashBytes = manifestHash.getBytes(StandardCharsets.UTF_8);
         out.writeByte(MSG_PIECE_MAP_REQUEST);
         out.writeInt(hashBytes.length);
@@ -60,6 +67,7 @@ public final class FrameEncoder {
 
     public static void writePieceMapResponse(DataOutputStream out, byte[] bitSetBytes)
             throws IOException {
+        // Reply with OK status, then length-prefixed bitset bytes
         out.writeByte(STATUS_OK);
         out.writeInt(bitSetBytes.length);
         if (bitSetBytes.length > 0) {

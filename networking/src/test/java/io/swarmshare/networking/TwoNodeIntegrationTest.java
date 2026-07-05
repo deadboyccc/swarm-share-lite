@@ -20,7 +20,13 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * End-to-end transfer over loopback TCP: seeder serves, leecher downloads.
+ * End-to-end integration test: TCP seeder and leecher over loopback.
+ *
+ * <p>
+ * Verifies that a file can be split into chunks, served via TCP,
+ * downloaded by a peer, and reassembled correctly. Uses temporary files
+ * and automatic cleanup. This test does NOT use mocks — it exercises
+ * real TCP sockets, chunk serving, and transfer orchestration.
  */
 class TwoNodeIntegrationTest {
 

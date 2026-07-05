@@ -16,8 +16,14 @@ import java.util.concurrent.Executors;
 /**
  * {@link PeerConnector} implementation over plain TCP binary framing.
  *
- * <p>Opens a fresh connection per request — simple and stateless. Connection pooling
- * is a future optimisation.
+ * <p>
+ * Opens a fresh connection per request — simple and stateless. Connection
+ * pooling
+ * is a future optimisation. Each fetch method opens a socket, exchanges a
+ * single
+ * request/response pair, and then closes the socket. Timeouts are applied to
+ * both
+ * connect and read operations to avoid indefinite blocking.
  */
 public final class TcpPeerConnector implements PeerConnector {
 
@@ -30,10 +36,11 @@ public final class TcpPeerConnector implements PeerConnector {
             try (Socket socket = new Socket()) {
                 socket.connect(peer.address(), TIMEOUT_MS);
                 socket.setSoTimeout(TIMEOUT_MS);
-
+                // Set up Data streams for simple length-prefixed framing
                 var out = new DataOutputStream(socket.getOutputStream());
                 var in = new DataInputStream(socket.getInputStream());
 
+                // Send chunk request and read response header
                 FrameEncoder.writeChunkRequest(out, id.manifestHash(), id.index());
 
                 byte status = in.readByte();
@@ -47,6 +54,7 @@ public final class TcpPeerConnector implements PeerConnector {
                     throw new IOException("Expected %d bytes, peer sent %d".formatted(size, dataLen));
                 }
 
+                // Read exactly the number of bytes advertised by the peer
                 return FrameDecoder.readExactly(in, dataLen);
             } catch (IOException e) {
                 throw new RuntimeException("Chunk fetch failed: " + id, e);
@@ -60,10 +68,10 @@ public final class TcpPeerConnector implements PeerConnector {
             try (Socket socket = new Socket()) {
                 socket.connect(peer.address(), TIMEOUT_MS);
                 socket.setSoTimeout(TIMEOUT_MS);
-
                 var out = new DataOutputStream(socket.getOutputStream());
                 var in = new DataInputStream(socket.getInputStream());
 
+                // Send request for piece map and parse the length-prefixed response
                 FrameEncoder.writePieceMapRequest(out, manifestHash);
 
                 byte status = in.readByte();

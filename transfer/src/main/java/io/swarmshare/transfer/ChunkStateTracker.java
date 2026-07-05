@@ -9,7 +9,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Thread-safe tracker for per-chunk lifecycle state and failure counts.
  *
- * <p>Uses {@link ConcurrentHashMap#replace} for atomic compare-and-swap transitions,
+ * <p>
+ * Uses {@link ConcurrentHashMap#replace} for atomic compare-and-swap
+ * transitions,
  * preventing two virtual threads from scheduling the same chunk concurrently.
  */
 public final class ChunkStateTracker {
@@ -28,6 +30,8 @@ public final class ChunkStateTracker {
      * @return {@code true} if the transition succeeded
      */
     public boolean transition(ChunkId id, ChunkState expected, ChunkState next) {
+        // ConcurrentHashMap.replace acts as a CAS here: only replace when value equals
+        // expected
         return states.replace(id, expected, next);
     }
 

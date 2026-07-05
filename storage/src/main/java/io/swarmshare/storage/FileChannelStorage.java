@@ -22,20 +22,26 @@ import java.util.BitSet;
 import java.util.Optional;
 
 /**
- * Writes and reads chunks at explicit byte offsets in a pre-allocated output file.
+ * Writes and reads chunks at explicit byte offsets in a pre-allocated output
+ * file.
  *
  * <h3>Why {@link FileChannel}?</h3>
  * <ul>
- *   <li>{@code FileChannel.write(buffer, position)} writes at an explicit offset atomically
- *       without moving a shared file-pointer — no external locking needed for disjoint ranges.</li>
- *   <li>{@code FileOutputStream} exposes only a sequential cursor; concurrent seeks require
- *       a mutex that serialises all writes.</li>
- *   <li>Virtual threads can block on I/O without pinning their carrier thread when using NIO
- *       channels (JDK 21+).</li>
+ * <li>{@code FileChannel.write(buffer, position)} writes at an explicit offset
+ * atomically
+ * without moving a shared file-pointer — no external locking needed for
+ * disjoint ranges.</li>
+ * <li>{@code FileOutputStream} exposes only a sequential cursor; concurrent
+ * seeks require
+ * a mutex that serialises all writes.</li>
+ * <li>Virtual threads can block on I/O without pinning their carrier thread
+ * when using NIO
+ * channels (JDK 21+).</li>
  * </ul>
  *
  * <h3>Thread safety</h3>
- * {@link FileChannel} guarantees atomicity for positional reads and writes at <em>distinct</em>
+ * {@link FileChannel} guarantees atomicity for positional reads and writes at
+ * <em>distinct</em>
  * offsets. Callers must ensure no two calls share an overlapping byte range.
  */
 public final class FileChannelStorage implements StorageProvider, Closeable {
@@ -46,8 +52,10 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     private final HasherPort verifier;
 
     /**
-     * Visible to concurrent virtual threads; volatile ensures safe publication after
-     * {@link #preallocateSpace} without a full synchronised block on the happy path.
+     * Visible to concurrent virtual threads; volatile ensures safe publication
+     * after
+     * {@link #preallocateSpace} without a full synchronised block on the happy
+     * path.
      */
     private volatile FileChannel channel;
 
@@ -61,17 +69,21 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     /**
      * Creates and pre-allocates the output file to exactly {@code totalSize} bytes.
      *
-     * <p>Writing a single byte at {@code totalSize - 1} forces the OS to actually
+     * <p>
+     * Writing a single byte at {@code totalSize - 1} forces the OS to actually
      * reserve the block range on disk, not just update inode metadata as
      * {@link FileChannel#truncate} alone would on many filesystems.
      *
-     * @param totalSize exact byte size the file must reach before any chunk is written
+     * @param totalSize exact byte size the file must reach before any chunk is
+     *                  written
      * @throws IllegalArgumentException if {@code totalSize} is non-positive
-     * @throws UncheckedIOException     if the file cannot be created or pre-allocated
+     * @throws UncheckedIOException     if the file cannot be created or
+     *                                  pre-allocated
      */
     @Override
     public void preallocateSpace(long totalSize) {
-        if (totalSize <= 0) throw new IllegalArgumentException("totalSize must be positive, got: " + totalSize);
+        if (totalSize <= 0)
+            throw new IllegalArgumentException("totalSize must be positive, got: " + totalSize);
 
         try {
             // Ensure parent directory exists before opening
@@ -79,12 +91,12 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
 
             channel = FileChannel.open(
                     outputPath,
-                    StandardOpenOption.CREATE_NEW,  // fail fast if file already exists
+                    StandardOpenOption.CREATE_NEW, // fail fast if file already exists
                     StandardOpenOption.READ,
-                    StandardOpenOption.WRITE
-            );
+                    StandardOpenOption.WRITE);
 
-            // Sets the logical file length; sufficient on some filesystems (e.g. APFS sparse)
+            // Sets the logical file length; sufficient on some filesystems (e.g. APFS
+            // sparse)
             channel.truncate(totalSize);
 
             // Materialise the allocation by writing one byte at the last position.
@@ -104,7 +116,8 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     /**
      * Writes {@code data} at the given absolute byte {@code offset} in the file.
      *
-     * <p>Loops until all bytes are written — {@link FileChannel#write} may perform
+     * <p>
+     * Loops until all bytes are written — {@link FileChannel#write} may perform
      * partial writes on some OS/kernel configurations even for NIO channels.
      *
      * @param id     chunk identifier (used only for error reporting)
@@ -117,7 +130,8 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
         ByteBuffer buffer = ByteBuffer.wrap(data);
         try {
             while (buffer.hasRemaining()) {
-                // Write from buffer.position() bytes into the file at (offset + bytesWrittenSoFar).
+                // Write from buffer.position() bytes into the file at (offset +
+                // bytesWrittenSoFar).
                 // FileChannel.write() returns the number of bytes actually written this call,
                 // and advances buffer.position() by that amount automatically — so the next
                 // iteration naturally picks up where this one left off.
@@ -135,7 +149,8 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      * @param id     chunk identifier (used only for error reporting)
      * @param offset absolute byte offset into the output file
      * @param size   number of bytes to read
-     * @return the chunk bytes, or {@link Optional#empty()} if the file is shorter than expected
+     * @return the chunk bytes, or {@link Optional#empty()} if the file is shorter
+     *         than expected
      */
     @Override
     public Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
@@ -143,7 +158,8 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
         try {
             while (buffer.hasRemaining()) {
                 int n = channel.read(buffer, offset + buffer.position());
-                if (n == -1) return Optional.empty(); // EOF before we filled the buffer
+                if (n == -1)
+                    return Optional.empty(); // EOF before we filled the buffer
             }
             return Optional.of(buffer.array());
         } catch (IOException e) {
@@ -156,13 +172,17 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     /**
      * Validates every chunk declared in {@code manifest}.
      *
-     * <p>For each chunk: reads the bytes at its declared offset, then verifies the
-     * SHA-256 digest against the manifest's expected hash. Sets the corresponding bit
+     * <p>
+     * For each chunk: reads the bytes at its declared offset, then verifies the
+     * SHA-256 digest against the manifest's expected hash. Sets the corresponding
+     * bit
      * in the returned {@link BitSet} only when <em>both</em> checks pass.
      *
      * @param manifest source of truth for chunk offsets, sizes, and expected hashes
-     * @return a {@link BitSet} of length {@code manifest.totalChunks()} where bit {@code i}
-     *         is {@code 1} iff chunk {@code i} exists on disk and its digest matches
+     * @return a {@link BitSet} of length {@code manifest.totalChunks()} where bit
+     *         {@code i}
+     *         is {@code 1} iff chunk {@code i} exists on disk and its digest
+     *         matches
      */
     @Override
     public BitSet checkExistingChunks(Manifest manifest) {
@@ -182,14 +202,17 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     /**
      * Closes the underlying {@link FileChannel}.
      *
-     * <p>Idempotent — safe to call more than once. Exceptions during close are logged
-     * but not propagated; the channel is unusable regardless of whether {@code close()}
+     * <p>
+     * Idempotent — safe to call more than once. Exceptions during close are logged
+     * but not propagated; the channel is unusable regardless of whether
+     * {@code close()}
      * itself throws.
      */
     @Override
     public void close() {
         FileChannel ch = channel;
-        if (ch == null || !ch.isOpen()) return;
+        if (ch == null || !ch.isOpen())
+            return;
         try {
             ch.close();
         } catch (IOException e) {

@@ -1,6 +1,13 @@
 package io.swarmshare.core.crypto;
 
 import org.junit.jupiter.api.Test;
+
+/**
+ * Unit tests for {@link Sha256}.
+ *
+ * <p>Tests verify correct SHA-256 computation against known vectors,
+ * case-insensitive comparison, and rejection of invalid hex input.
+ */
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -103,7 +110,7 @@ class Sha256Test {
 
     @ParameterizedTest(name = "verify rejects null/blank expectedHash [{0}]")
     @NullAndEmptySource
-    @ValueSource(strings = {" ", "\t", "\n"})
+    @ValueSource(strings = { " ", "\t", "\n" })
     void verify_nullOrBlankHash_returnsFalse(String hash) {
         assertThat(verifier.verify(bytes("any-data"), hash)).isFalse();
     }
@@ -121,13 +128,14 @@ class Sha256Test {
 
     @Test
     void compute_concurrentVirtualThreads_allProduceCorrectHashes() throws InterruptedException {
-        record Payload(byte[] data, String expected) {}
+        record Payload(byte[] data, String expected) {
+        }
 
         List<Payload> payloads = List.of(
                 new Payload(bytes("data-stream-A"), "a1fc603c9e9aa60268f0192ccc47d77ec0038fe0c2e331b82223e420fa6c90c4"),
                 new Payload(bytes("data-stream-B"), "dc5384a624842261fa9b6f19985525b8be4b012754054d326e876aeb7c517a5b"),
-                new Payload(bytes("data-stream-C"), "0677dd0021b8bc58b822b3bd23fd6467c5e2b847b787f2f34b9ecb12e2d28c7c")
-        );
+                new Payload(bytes("data-stream-C"),
+                        "0677dd0021b8bc58b822b3bd23fd6467c5e2b847b787f2f34b9ecb12e2d28c7c"));
 
         int iterations = 200;
         CountDownLatch startGate = new CountDownLatch(1);

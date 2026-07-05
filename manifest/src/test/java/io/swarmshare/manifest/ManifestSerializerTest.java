@@ -2,6 +2,14 @@
 package io.swarmshare.manifest;
 
 import io.swarmshare.core.domain.ChunkDescriptor;
+
+/**
+ * Unit tests for {@link ManifestSerializer}.
+ *
+ * <p>Tests verify JSON round-trip serialization and deserialization,
+ * ensuring the wire contract is stable and manifests can be reliably
+ * exchanged between seeder and peers.
+ */
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
 import org.junit.jupiter.api.Test;
@@ -18,13 +26,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Unit tests for {@link ManifestSerializer}.
  *
- * <p>Coverage targets:
+ * <p>
+ * Coverage targets:
  * <ul>
- *   <li>File round-trip — write then read produces field-identical manifest</li>
- *   <li>String round-trip — toJson → fromJson preserves all fields</li>
- *   <li>JSON shape — expected field names present in the serialized output</li>
- *   <li>Multi-chunk — all chunk descriptors serialized and restored</li>
- *   <li>Rejection — missing or unreadable files</li>
+ * <li>File round-trip — write then read produces field-identical manifest</li>
+ * <li>String round-trip — toJson → fromJson preserves all fields</li>
+ * <li>JSON shape — expected field names present in the serialized output</li>
+ * <li>Multi-chunk — all chunk descriptors serialized and restored</li>
+ * <li>Rejection — missing or unreadable files</li>
  * </ul>
  */
 class ManifestSerializerTest {
@@ -151,12 +160,12 @@ class ManifestSerializerTest {
 
         Manifest restored = serializer.fromJson(serializer.toJson(original));
 
-        restored.chunks().forEach(desc ->
-                assertThat(desc.id().manifestHash())
-                        .isEqualTo(restored.fileHash()));
+        restored.chunks().forEach(desc -> assertThat(desc.id().manifestHash())
+                .isEqualTo(restored.fileHash()));
     }
 
-    // ── JSON shape ────────────────────────────────────────────────────────────────
+    // ── JSON shape
+    // ────────────────────────────────────────────────────────────────
 
     @Test
     void toJson_containsExpectedTopLevelFieldNames() {
@@ -194,7 +203,8 @@ class ManifestSerializerTest {
             throws IOException {
         // Write a real 200-byte binary file
         byte[] content = new byte[200];
-        for (int i = 0; i < content.length; i++) content[i] = (byte) i;
+        for (int i = 0; i < content.length; i++)
+            content[i] = (byte) i;
         Path sourceFile = dir.resolve("source.bin");
         Files.write(sourceFile, content);
 
@@ -227,7 +237,8 @@ class ManifestSerializerTest {
         }
     }
 
-    // ── error cases ───────────────────────────────────────────────────────────────
+    // ── error cases
+    // ───────────────────────────────────────────────────────────────
 
     @Test
     void read_nonExistentFile_throwsUncheckedIOException() {

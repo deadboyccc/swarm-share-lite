@@ -37,13 +37,13 @@ public final class TransferManager {
     private final BitSet heldChunks;
 
     public TransferManager(Manifest manifest, List<PeerInfo> peers,
-                           StorageProvider storage, PeerConnector connector) {
+            StorageProvider storage, PeerConnector connector) {
         this(manifest, peers, storage, connector, new Sha256());
     }
 
     TransferManager(Manifest manifest, List<PeerInfo> peers,
-                    StorageProvider storage, PeerConnector connector,
-                    HasherPort verifier) {
+            StorageProvider storage, PeerConnector connector,
+            HasherPort verifier) {
         this.manifest = manifest;
         this.peers = List.copyOf(peers);
         this.storage = storage;
@@ -66,12 +66,14 @@ public final class TransferManager {
 
         Map<PeerInfo, BitSet> peerPieceMaps = collectPieceMaps();
 
+        // Determine which chunks are still missing on disk and need download
         List<ChunkDescriptor> missing = manifest.chunks().stream()
                 .filter(desc -> !heldChunks.get(desc.id().index()))
                 .toList();
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (ChunkDescriptor chunk : missing) {
+                // Prepare per-chunk state and select a peer that advertises it
                 stateTracker.initialize(chunk.id());
                 PeerInfo source = selectPeer(chunk.id().index(), peerPieceMaps);
                 if (source == null) {
@@ -79,6 +81,7 @@ public final class TransferManager {
                     continue;
                 }
                 stateTracker.transition(chunk.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
+                // Download on its own virtual thread
                 executor.submit(() -> downloadWithRetry(chunk, source, peerPieceMaps));
             }
         }
@@ -87,7 +90,7 @@ public final class TransferManager {
     }
 
     private void downloadWithRetry(ChunkDescriptor desc, PeerInfo initial,
-                                   Map<PeerInfo, BitSet> pieceMaps) {
+            Map<PeerInfo, BitSet> pieceMaps) {
         int attempts = 0;
         PeerInfo source = initial;
 
@@ -108,10 +111,12 @@ public final class TransferManager {
                     return;
                 }
 
+                // Verification failed: mark missing and pick an alternative peer
                 stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.MISSING);
                 stateTracker.incrementFailure(desc.id());
                 source = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
-                if (source == null) break;
+                if (source == null)
+                    break;
                 stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
 
             } catch (Exception e) {
@@ -120,7 +125,8 @@ public final class TransferManager {
                 stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.MISSING);
                 stateTracker.incrementFailure(desc.id());
                 source = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
-                if (source == null) break;
+                if (source == null)
+                    break;
                 stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
             } finally {
                 inflightLimit.release();
@@ -151,7 +157,7 @@ public final class TransferManager {
     }
 
     private PeerInfo selectAlternativePeer(int chunkIndex, PeerInfo exclude,
-                                           Map<PeerInfo, BitSet> pieceMaps) {
+            Map<PeerInfo, BitSet> pieceMaps) {
         return pieceMaps.entrySet().stream()
                 .filter(e -> !e.getKey().equals(exclude))
                 .filter(e -> e.getValue().get(chunkIndex))
@@ -168,7 +174,7 @@ public final class TransferManager {
      * the peer's copy is bad.
      */
     private PeerInfo nextPeerAfterFailure(int chunkIndex, PeerInfo current,
-                                          Map<PeerInfo, BitSet> pieceMaps) {
+            Map<PeerInfo, BitSet> pieceMaps) {
         PeerInfo alternative = selectAlternativePeer(chunkIndex, current, pieceMaps);
         if (alternative != null) {
             return alternative;

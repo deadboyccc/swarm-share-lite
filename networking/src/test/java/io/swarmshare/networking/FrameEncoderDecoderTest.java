@@ -12,6 +12,14 @@ import java.util.BitSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Unit tests for {@link FrameEncoder} and {@link FrameDecoder}.
+ *
+ * <p>
+ * Tests verify correctness of binary framing: message type bytes,
+ * length-prefixed strings, payload encoding/decoding, and error handling
+ * for prematurely terminated streams.
+ */
 class FrameEncoderDecoderTest {
 
     private static final String MANIFEST_HASH = "deadbeef".repeat(8);
@@ -74,7 +82,7 @@ class FrameEncoderDecoderTest {
 
     @Test
     void readExactly_throwsOnPrematureEof() {
-        var in = new DataInputStream(new ByteArrayInputStream(new byte[]{0x01, 0x02}));
+        var in = new DataInputStream(new ByteArrayInputStream(new byte[] { 0x01, 0x02 }));
         assertThatThrownBy(() -> FrameDecoder.readExactly(in, 10))
                 .isInstanceOf(java.io.IOException.class)
                 .hasMessageContaining("Stream ended");

@@ -1,6 +1,14 @@
 package io.swarmshare.storage;
 
 import io.swarmshare.core.crypto.Sha256;
+
+/**
+ * Unit tests for {@link FileChannelStorage}.
+ *
+ * <p>Tests cover concurrent writes to disjoint offsets, read error handling,
+ * pre-allocation behavior, and chunk validation. Uses temporary directories
+ * and files that are automatically cleaned up after each test.
+ */
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
@@ -24,16 +32,24 @@ import static org.mockito.Mockito.when;
 /**
  * Integration tests for {@link FileChannelStorage}.
  *
- * <p>"Integration" here means real filesystem I/O — no mocking of the channel itself.
- * JUnit's {@link TempDir} guarantees isolation: each test class gets a fresh directory
+ * <p>
+ * "Integration" here means real filesystem I/O — no mocking of the channel
+ * itself.
+ * JUnit's {@link TempDir} guarantees isolation: each test class gets a fresh
+ * directory
  * that is deleted (recursively) after the suite, regardless of test outcome.
  *
- * <p>Coverage targets:
+ * <p>
+ * Coverage targets:
  * <ul>
- * <li>{@code preallocateSpace} — file created, exact size, idempotency / rejection of zero</li>
- * <li>{@code writeChunk} — bytes land at the correct offset, adjacent chunks don't bleed</li>
- * <li>{@code readChunk} — round-trip fidelity, EOF sentinel for out-of-bounds reads</li>
- * <li>{@code checkExistingChunks} — BitSet reflects valid vs. corrupted vs. missing chunks</li>
+ * <li>{@code preallocateSpace} — file created, exact size, idempotency /
+ * rejection of zero</li>
+ * <li>{@code writeChunk} — bytes land at the correct offset, adjacent chunks
+ * don't bleed</li>
+ * <li>{@code readChunk} — round-trip fidelity, EOF sentinel for out-of-bounds
+ * reads</li>
+ * <li>{@code checkExistingChunks} — BitSet reflects valid vs. corrupted vs.
+ * missing chunks</li>
  * <li>{@code close} — idempotent, channel closed after try-with-resources</li>
  * </ul>
  */
@@ -194,8 +210,7 @@ class FileChannelStorageTest {
 
         Manifest manifest = manifestOf(
                 chunkDescriptor(0, 0L, chunkSize, verifier.compute(data0)),
-                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(data1))
-        );
+                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(data1)));
 
         BitSet result = storage.checkExistingChunks(manifest);
 
@@ -217,8 +232,7 @@ class FileChannelStorageTest {
         Manifest manifest = manifestOf(
                 chunkDescriptor(0, 0L, chunkSize, verifier.compute(good)),
                 // Manifest declares correct hash, but on-disk bytes are corrupt
-                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(good))
-        );
+                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(good)));
 
         BitSet result = storage.checkExistingChunks(manifest);
 
@@ -280,10 +294,10 @@ class FileChannelStorageTest {
 
     private static ChunkDescriptor chunkDescriptor(int index, long offset, int size, String sha256) {
         ChunkDescriptor desc = mock(ChunkDescriptor.class);
-        
+
         // BUG FIX: Isolate the nested mock creation before passing it to thenReturn()
-        ChunkId resolvedId = chunkId(index); 
-        
+        ChunkId resolvedId = chunkId(index);
+
         when(desc.id()).thenReturn(resolvedId);
         when(desc.offset()).thenReturn(offset);
         when(desc.size()).thenReturn(size);

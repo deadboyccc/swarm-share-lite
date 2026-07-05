@@ -18,8 +18,15 @@ import java.util.concurrent.Executors;
 /**
  * TCP listener that serves chunk and piece-map requests to remote peers.
  *
- * <p>Each accepted connection is handled on a dedicated virtual thread — no thread-pool
- * sizing required for blocking socket I/O under Project Loom.
+ * <p>
+ * Each accepted connection is handled on a dedicated virtual thread — no
+ * thread-pool
+ * sizing required for blocking socket I/O under Project Loom. The server is
+ * intentionally
+ * simple: it reads a single request from the peer, writes a response, then
+ * closes the
+ * socket. This keeps the protocol stateless and the implementation
+ * straightforward.
  */
 public final class TcpChunkServer implements AutoCloseable {
 
@@ -41,7 +48,8 @@ public final class TcpChunkServer implements AutoCloseable {
     }
 
     /**
-     * Binds to {@code port} and accepts connections until interrupted or {@link #close()} is called.
+     * Binds to {@code port} and accepts connections until interrupted or
+     * {@link #close()} is called.
      */
     public void start() throws IOException {
         executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -51,6 +59,8 @@ public final class TcpChunkServer implements AutoCloseable {
         try {
             while (!Thread.currentThread().isInterrupted() && !serverSocket.isClosed()) {
                 Socket client = serverSocket.accept();
+                // Each client handled on its own virtual thread to avoid blocking carrier
+                // threads
                 executor.submit(() -> handleClient(client));
             }
         } catch (IOException e) {
@@ -72,10 +82,13 @@ public final class TcpChunkServer implements AutoCloseable {
     }
 
     private void handleClient(Socket client) {
+        // Try-with-resources ensures socket and streams are closed when the method
+        // exits.
         try (client;
-             var in = new DataInputStream(client.getInputStream());
-             var out = new DataOutputStream(client.getOutputStream())) {
+                var in = new DataInputStream(client.getInputStream());
+                var out = new DataOutputStream(client.getOutputStream())) {
 
+            // First byte indicates message type; delegate to specific handlers.
             byte msgType = in.readByte();
             switch (msgType) {
                 case FrameEncoder.MSG_PIECE_MAP_REQUEST -> handlePieceMapRequest(in, out);
@@ -83,23 +96,26 @@ public final class TcpChunkServer implements AutoCloseable {
                 default -> FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_ERROR, new byte[0]);
             }
         } catch (IOException e) {
+            // Client may disconnect abruptly; log at DEBUG and move on.
             LOG.log(Level.DEBUG, "Client disconnected: {0}", e.getMessage());
         }
     }
 
     private void handleChunkRequest(DataInputStream in, DataOutputStream out) throws IOException {
         var req = FrameDecoder.readChunkRequest(in);
-
+        // Validate manifest hash first — quick rejection for wrong swarm
         if (!manifest.fileHash().equals(req.manifestHash())) {
             FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_NOT_FOUND, new byte[0]);
             return;
         }
 
+        // Validate requested index bounds
         if (req.chunkIndex() < 0 || req.chunkIndex() >= manifest.totalChunks()) {
             FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_NOT_FOUND, new byte[0]);
             return;
         }
 
+        // Attempt to read the chunk from storage and reply with the bytes if present
         var desc = manifest.chunkAt(req.chunkIndex());
         var bytes = storage.readChunk(
                 new ChunkId(req.manifestHash(), req.chunkIndex()),
@@ -115,10 +131,13 @@ public final class TcpChunkServer implements AutoCloseable {
 
     private void handlePieceMapRequest(DataInputStream in, DataOutputStream out) throws IOException {
         String requestedHash = FrameDecoder.readPieceMapRequest(in);
+        // Return NOT_FOUND if this server's manifest does not match the request
         if (!manifest.fileHash().equals(requestedHash)) {
             FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_NOT_FOUND, new byte[0]);
             return;
         }
+
+        // heldChunks is a shared BitSet; synchronise to obtain a stable snapshot
         synchronized (heldChunks) {
             FrameEncoder.writePieceMapResponse(out, heldChunks.toByteArray());
         }
