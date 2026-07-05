@@ -33,6 +33,99 @@
 
 ---
 
+## System Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph CLI["CLI Layer"]
+        Main["Main.java<br/>(seed, build-manifest)"]
+        SeederFS["SeederFileStorage<br/>(read-only provider)"]
+    end
+    
+    subgraph Transfer["Transfer/Orchestration Layer"]
+        TM["TransferManager<br/>(coordinator)"]
+        CST["ChunkStateTracker<br/>(atomic state)"]
+        RP["RetryPolicy<br/>(exponential backoff)"]
+    end
+    
+    subgraph Networking["Networking Layer"]
+        TCS["TcpChunkServer<br/>(listen + serve)"]
+        TPC["TcpPeerConnector<br/>(fetch chunks)"]
+        FE["FrameEncoder<br/>(serialize)"]
+        FD["FrameDecoder<br/>(deserialize)"]
+    end
+    
+    subgraph Storage["Storage Layer"]
+        FCS["FileChannelStorage<br/>(NIO I/O)"]
+    end
+    
+    subgraph Manifest["Manifest Layer"]
+        MB["ManifestBuilder<br/>(chunk split)"]
+        MS["ManifestSerializer<br/>(JSON)"]
+        MV["ManifestValidator<br/>(verify)"]
+    end
+    
+    subgraph Core["Core/Domain Layer"]
+        ChunkId["ChunkId<br/>(manifestHash+index)"]
+        Manifest["Manifest<br/>(file metadata)"]
+        ChunkState["ChunkState<br/>(MISSING→WRITTEN)"]
+        PeerInfo["PeerInfo<br/>(peer identity)"]
+        HasherPort["HasherPort<br/>(interface)"]
+        Sha256["Sha256<br/>(constant-time)"]
+    end
+    
+    Main -->|orchestrates| TM
+    Main -->|provides| SeederFS
+    
+    TM -->|coordinates| TCS
+    TM -->|fetches via| TPC
+    TM -->|tracks state| CST
+    TM -->|applies| RP
+    TM -->|uses| FCS
+    TM -->|validates| Manifest
+    
+    TCS -->|encodes responses| FE
+    TPC -->|decodes chunks| FD
+    FE -->|uses| ManifestClass["Manifest (domain)"]
+    FD -->|uses| ManifestClass
+    
+    FCS -->|reads/writes| StorageInterface["StorageProvider<br/>(interface)"]
+    
+    MB -->|produces| MS
+    MS -->|validates with| MV
+    
+    TM -->|consumes| Manifest
+    TPC -->|consumes| Manifest
+    TCS -->|serves from| Manifest
+    
+    FCS -->|uses hashing port| HasherPort
+    MB -->|uses hashing port| HasherPort
+    HasherPort -.->|implemented by| Sha256
+    
+    TM -->|uses| PeerInfo
+    TPC -->|connects to| PeerInfo
+    
+    TM -->|transitions| ChunkState
+    CST -->|manages| ChunkState
+    
+    style Core fill:#e1f5e1
+    style Manifest fill:#e3f2fd
+    style Storage fill:#fff3e0
+    style Networking fill:#fce4ec
+    style Transfer fill:#f3e5f5
+    style CLI fill:#ede7f6
+```
+
+**Dependency Flow:**
+- **CLI** → Commands invoke `TransferManager`
+- **Transfer** → Orchestrates all other layers, manages state and backpressure
+- **Networking** → Implements peer communication via TCP binary protocol
+- **Storage** → Provides random-access I/O for partial downloads and resume
+- **Manifest** → Splits files into chunks, validates integrity
+- **Core** → Domain model (zero I/O, zero dependencies) — all other layers depend inward only
+
+---
+
 ## 1. Vision & Goals
 
 ### The Problem
