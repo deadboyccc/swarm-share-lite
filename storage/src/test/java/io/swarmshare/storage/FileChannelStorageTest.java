@@ -196,6 +196,19 @@ class FileChannelStorageTest {
         assertThat(result).isEmpty();
     }
 
+    @Test
+    void readChunk_existingFileWithoutPreallocate_readsFileContents() throws IOException {
+        byte[] payload = "existing-file-content".getBytes();
+        Files.write(testFile, payload);
+
+        FileChannelStorage existingStorage = new FileChannelStorage(testFile);
+        Optional<byte[]> result = existingStorage.readChunk(chunkId(0), 0L, payload.length);
+
+        assertThat(result).isPresent();
+        assertThat(result.get()).isEqualTo(payload);
+        existingStorage.close();
+    }
+
     // ── checkExistingChunks ──────────────────────────────────────────────────────
 
     @Test
