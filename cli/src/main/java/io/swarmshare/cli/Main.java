@@ -26,25 +26,22 @@ import java.util.concurrent.Callable;
 /**
  * CLI entrypoint for development and manual testing, built on picocli.
  *
- * <p>Commands:
+ * <p>
+ * Commands:
  * <ul>
- *   <li>{@code seed <file> <port>} — serve the given file to peers over TCP,
- *       writing a manifest JSON file alongside it</li>
- *   <li>{@code build-manifest <file> [chunkSize]} — compute, print, and persist
- *       a manifest without serving the file</li>
- *   <li>{@code download <manifestFile> <output> <peerHost:peerPort>...} — fetch
- *       a manifest's chunks from one or more peers and write them to disk</li>
+ * <li>{@code seed <file> <port>} — serve the given file to peers over TCP,
+ * writing a manifest JSON file alongside it</li>
+ * <li>{@code build-manifest <file> [chunkSize]} — compute, print, and persist
+ * a manifest without serving the file</li>
+ * <li>{@code download <manifestFile> <output> <peerHost:peerPort>...} — fetch
+ * a manifest's chunks from one or more peers and write them to disk</li>
  * </ul>
  */
-@Command(
-        name = "swarm-share",
-        description = "P2P chunk-based file distribution CLI",
-        subcommands = {
-                Main.SeedCommand.class,
-                Main.BuildManifestCommand.class,
-                Main.DownloadCommand.class
-        }
-)
+@Command(name = "swarm-share", description = "P2P chunk-based file distribution CLI", subcommands = {
+        Main.SeedCommand.class,
+        Main.BuildManifestCommand.class,
+        Main.DownloadCommand.class
+})
 public final class Main implements Runnable {
 
     public static void main(String[] args) {
@@ -59,16 +56,25 @@ public final class Main implements Runnable {
     }
 
     /**
-     * Derives the conventional manifest path for a source file: {@code <file>.manifest.json}
-     * next to the file itself. Used by both {@code seed} and {@code build-manifest} so a
+     * Derives the conventional manifest path for a source file:
+     * {@code <file>.manifest.json}
+     * next to the file itself. Used by both {@code seed} and {@code build-manifest}
+     * so a
      * {@code download} run always knows where to look.
      */
     private static Path manifestPathFor(Path sourceFile) {
         return sourceFile.resolveSibling(sourceFile.getFileName() + ".manifest.json");
     }
 
+    private static BitSet heldChunksFor(Manifest manifest) {
+        BitSet held = new BitSet(manifest.totalChunks());
+        held.set(0, manifest.totalChunks());
+        return held;
+    }
+
     /**
-     * {@code seed <file> <port>} — builds a manifest for {@code file}, persists it to
+     * {@code seed <file> <port>} — builds a manifest for {@code file}, persists it
+     * to
      * {@code <file>.manifest.json}, and serves every chunk to peers over a TCP
      * {@link TcpChunkServer} listening on {@code port}.
      */
@@ -97,13 +103,9 @@ public final class Main implements Runnable {
             // Use the storage module's FileChannelStorage directly against the source
             // file. Seeding only ever reads chunks back out to serve peers — there's no
             // write path, so no preallocation or resume logic is needed here.
-            try (var storage = new FileChannelStorage(file)) {
+            try (var storage = new FileChannelStorage(file);
+                    var server = new TcpChunkServer(port, storage, manifest, heldChunksFor(manifest))) {
                 // The full file is already on disk, so every chunk is held from the start.
-                BitSet held = new BitSet(manifest.totalChunks());
-                held.set(0, manifest.totalChunks());
-
-                TcpChunkServer server = new TcpChunkServer(port, storage, manifest, held);
-
                 Thread serverThread = Thread.startVirtualThread(() -> {
                     try {
                         server.start();
@@ -124,8 +126,13 @@ public final class Main implements Runnable {
                     }
                 }
 
-                // Block until the server thread exits (server closed/interrupted).
-                serverThread.join();
+                try {
+                    // Block until the server thread exits (server closed/interrupted).
+                    serverThread.join();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
             }
 
             return 0;
@@ -133,9 +140,12 @@ public final class Main implements Runnable {
     }
 
     /**
-     * {@code build-manifest <file> [chunkSize]} — computes a manifest for {@code file},
-     * prints a summary, and persists it to {@code <file>.manifest.json} (or a custom
-     * path via {@code --output}) so it can be shared with peers without running a seeder.
+     * {@code build-manifest <file> [chunkSize]} — computes a manifest for
+     * {@code file},
+     * prints a summary, and persists it to {@code <file>.manifest.json} (or a
+     * custom
+     * path via {@code --output}) so it can be shared with peers without running a
+     * seeder.
      */
     @Command(name = "build-manifest", description = "Compute, print, and persist a manifest")
     static final class BuildManifestCommand implements Callable<Integer> {
@@ -143,13 +153,12 @@ public final class Main implements Runnable {
         @Parameters(index = "0", description = "File to build a manifest for")
         private Path file;
 
-        @Parameters(index = "1", arity = "0..1",
-                description = "Chunk size in bytes (default: ${DEFAULT-VALUE})",
-                defaultValue = "" + ManifestBuilder.DEFAULT_CHUNK_SIZE)
+        @Parameters(index = "1", arity = "0..1", description = "Chunk size in bytes (default: ${DEFAULT-VALUE})", defaultValue = ""
+                + ManifestBuilder.DEFAULT_CHUNK_SIZE)
         private int chunkSize;
 
-        @Option(names = {"-o", "--output"},
-                description = "Where to write the manifest JSON (default: <file>.manifest.json)")
+        @Option(names = { "-o",
+                "--output" }, description = "Where to write the manifest JSON (default: <file>.manifest.json)")
         private Path outputOverride;
 
         @Override

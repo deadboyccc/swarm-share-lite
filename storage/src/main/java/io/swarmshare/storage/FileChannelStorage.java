@@ -127,6 +127,12 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      */
     @Override
     public void writeChunk(ChunkId id, long offset, byte[] data) {
+        FileChannel ch = channel;
+        if (ch == null || !ch.isOpen()) {
+            throw new IllegalStateException(
+                    "Storage is not initialized for %s. Call preallocateSpace() before writing.".formatted(outputPath));
+        }
+
         ByteBuffer buffer = ByteBuffer.wrap(data);
         try {
             while (buffer.hasRemaining()) {
@@ -135,7 +141,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
                 // FileChannel.write() returns the number of bytes actually written this call,
                 // and advances buffer.position() by that amount automatically — so the next
                 // iteration naturally picks up where this one left off.
-                channel.write(buffer, offset + buffer.position());
+                ch.write(buffer, offset + buffer.position());
             }
         } catch (IOException e) {
             throw new UncheckedIOException(
@@ -154,10 +160,15 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      */
     @Override
     public Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
+        if (size < 0) {
+            throw new IllegalArgumentException("size must be >= 0, got: " + size);
+        }
+
         ByteBuffer buffer = ByteBuffer.allocate(size);
         try {
+            FileChannel ch = ensureReadableChannel();
             while (buffer.hasRemaining()) {
-                int n = channel.read(buffer, offset + buffer.position());
+                int n = ch.read(buffer, offset + buffer.position());
                 if (n == -1)
                     return Optional.empty(); // EOF before we filled the buffer
             }
@@ -208,6 +219,19 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      * {@code close()}
      * itself throws.
      */
+    private FileChannel ensureReadableChannel() throws IOException {
+        FileChannel ch = channel;
+        if (ch != null && ch.isOpen()) {
+            return ch;
+        }
+        if (!Files.exists(outputPath)) {
+            throw new IOException("Storage file does not exist: " + outputPath);
+        }
+        ch = FileChannel.open(outputPath, StandardOpenOption.READ);
+        channel = ch;
+        return ch;
+    }
+
     @Override
     public void close() {
         FileChannel ch = channel;
