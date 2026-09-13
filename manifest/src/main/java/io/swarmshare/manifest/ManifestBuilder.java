@@ -53,6 +53,12 @@ public final class ManifestBuilder {
      */
     public static final int DEFAULT_CHUNK_SIZE = 1024 * 1024;
 
+    /**
+     * Upper bound on chunk size. Larger values would allocate huge buffers on
+     * both seeder and leecher from a hostile or mistaken manifest.
+     */
+    public static final int MAX_CHUNK_SIZE = 16 * 1024 * 1024;
+
     private static final Logger LOG = System.getLogger(ManifestBuilder.class.getName());
     private static final HexFormat HEX = HexFormat.of();
 
@@ -74,6 +80,8 @@ public final class ManifestBuilder {
     public ManifestBuilder(int chunkSize, HasherPort verifier) {
         if (chunkSize < 1) throw new IllegalArgumentException(
                 "chunkSize must be >= 1, got: " + chunkSize);
+        if (chunkSize > MAX_CHUNK_SIZE) throw new IllegalArgumentException(
+                "chunkSize must be <= " + MAX_CHUNK_SIZE + ", got: " + chunkSize);
         this.chunkSize = chunkSize;
         this.verifier = verifier;
     }
@@ -179,12 +187,21 @@ public final class ManifestBuilder {
             // (partial read) — loop until either the buffer is full or we reach EOF.
             while (buffer.hasRemaining()) {
                 int n = channel.read(buffer, fileOffset + buffer.position());
-                if (n == -1) break; // EOF
+                if (n < 0) {
+                    break; // EOF
+                }
+                if (n == 0) {
+                    throw new IOException("Zero-length read at offset "
+                            + (fileOffset + buffer.position()));
+                }
             }
 
             buffer.flip(); // switch to read mode: limit = bytes read, position = 0
             int bytesRead = buffer.limit();
-            if (bytesRead == 0) break; // defensive guard against an infinite loop at EOF
+            if (bytesRead == 0) {
+                throw new IOException("Unexpected EOF at offset " + fileOffset
+                        + " (declared size " + totalSize + ")");
+            }
 
             // Copy buffer content to a byte array for hashing.
             // This is unavoidable: MessageDigest.update(byte[]) needs a concrete array.
@@ -201,6 +218,10 @@ public final class ManifestBuilder {
 
             fileOffset += bytesRead;
             index++;
+        }
+
+        if (fileOffset != totalSize) {
+            throw new IOException("Read " + fileOffset + " bytes but file size was " + totalSize);
         }
 
         // Finalize whole-file hash now that all bytes have been fed

@@ -113,12 +113,14 @@ class FileChannelStorageTest {
     }
 
     @Test
-    void preallocateSpace_fileAlreadyExists_throwsUncheckedIOException() throws IOException {
-        Files.createFile(testFile);
+    void preallocateSpace_existingSameSizeFile_preservesContentsForResume() throws IOException {
+        byte[] existing = "already-downloaded-bytes".getBytes();
+        Files.write(testFile, existing);
 
-        // CREATE_NEW must fail fast rather than silently clobbering existing data
-        assertThatThrownBy(() -> storage.preallocateSpace(512))
-                .isInstanceOf(java.io.UncheckedIOException.class);
+        storage.preallocateSpace(existing.length);
+
+        assertThat(Files.readAllBytes(testFile)).isEqualTo(existing);
+        assertThat(Files.size(testFile)).isEqualTo(existing.length);
     }
 
     // ── writeChunk / readChunk — round-trip ──────────────────────────────────────
@@ -254,6 +256,32 @@ class FileChannelStorageTest {
     }
 
     @Test
+    void preallocateSpace_onCompleteFile_doesNotInvalidateExistingChunks() {
+        byte[] data0 = "resume-chunk-0".getBytes();
+        byte[] data1 = "resume-chunk-1".getBytes();
+        int chunkSize = data0.length;
+
+        storage.preallocateSpace((long) chunkSize * 2);
+        storage.writeChunk(chunkId(0), 0L, data0);
+        storage.writeChunk(chunkId(1), chunkSize, data1);
+        storage.close();
+
+        FileChannelStorage resumed = new FileChannelStorage(testFile);
+        resumed.preallocateSpace((long) chunkSize * 2);
+
+        Manifest manifest = manifestOf(
+                chunkDescriptor(0, 0L, chunkSize, verifier.compute(data0)),
+                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(data1)));
+
+        BitSet result = resumed.checkExistingChunks(manifest);
+        resumed.close();
+
+        assertThat(result.get(0)).isTrue();
+        assertThat(result.get(1)).isTrue();
+        assertThat(result.cardinality()).isEqualTo(2);
+    }
+
+    @Test
     void checkExistingChunks_emptyManifest_returnsEmptyBitSet() {
         storage.preallocateSpace(64);
 
@@ -295,6 +323,19 @@ class FileChannelStorageTest {
         try (FileChannelStorage s2 = new FileChannelStorage(tempDir.resolve("closeable-test-2.bin"))) {
             s2.preallocateSpace(32);
         }
+    }
+
+    @Test
+    void flush_afterWrites_doesNotThrow() {
+        storage.preallocateSpace(16);
+        storage.writeChunk(chunkId(0), 0L, "durable".getBytes());
+        storage.flush();
+        storage.flush();
+    }
+
+    @Test
+    void flush_beforePreallocate_isNoOp() {
+        storage.flush();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────

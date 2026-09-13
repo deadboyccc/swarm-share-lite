@@ -34,6 +34,12 @@ public final class RetryPolicy {
     public RetryPolicy(int maxAttempts, Duration initialDelay, Duration maxDelay) {
         if (maxAttempts < 1)
             throw new IllegalArgumentException("maxAttempts must be >= 1");
+        if (initialDelay == null || maxDelay == null) {
+            throw new IllegalArgumentException("delays must not be null");
+        }
+        if (initialDelay.isNegative() || maxDelay.isNegative()) {
+            throw new IllegalArgumentException("delays must not be negative");
+        }
         this.maxAttempts = maxAttempts;
         this.initialDelay = initialDelay;
         this.maxDelay = maxDelay;
@@ -43,9 +49,23 @@ public final class RetryPolicy {
      * Computes wait duration for attempt {@code attempt} (0-indexed).
      */
     public Duration delayFor(int attempt) {
-        // Exponential backoff: initialDelay * 2^attempt, capped at maxDelay
-        long ms = initialDelay.toMillis() * (1L << attempt);
-        return Duration.ofMillis(Math.min(ms, maxDelay.toMillis()));
+        if (attempt < 0) {
+            throw new IllegalArgumentException("attempt must be >= 0, got: " + attempt);
+        }
+        long cap = maxDelay.toMillis();
+        long initial = initialDelay.toMillis();
+        // Shifting a long by 63+ is either sign-bit or wraps; both overflow the delay.
+        if (attempt >= Long.SIZE - 1) {
+            return Duration.ofMillis(cap);
+        }
+        long multiplier = 1L << attempt;
+        long ms;
+        try {
+            ms = Math.multiplyExact(initial, multiplier);
+        } catch (ArithmeticException e) {
+            ms = cap;
+        }
+        return Duration.ofMillis(Math.min(ms, cap));
     }
 
     /**

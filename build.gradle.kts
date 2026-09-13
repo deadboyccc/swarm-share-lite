@@ -44,8 +44,7 @@ project(":networking") {
 }
 project(":transfer")    { dependencies {
     implementation(project(":core"))
-    implementation(project(":storage"))
-    testImplementation(project(":manifest"))
+    implementation(project(":manifest"))
 } }
 project(":cli")         { dependencies {
     implementation(project(":core"))

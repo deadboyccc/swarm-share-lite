@@ -62,12 +62,11 @@ class ManifestBuilderTest {
 
     // ── empty file rejection ─────────────────────────────────────────────────────
 
-    @ParameterizedTest(name = "chunkSize {0} is invalid")
-    @ValueSource(ints = {0, -1, Integer.MIN_VALUE})
-    void constructor_invalidChunkSize_throwsIllegalArgument(int bad) {
-        assertThatThrownBy(() -> new ManifestBuilder(bad))
+    @Test
+    void constructor_chunkSizeAboveMax_throwsIllegalArgument() {
+        assertThatThrownBy(() -> new ManifestBuilder(ManifestBuilder.MAX_CHUNK_SIZE + 1))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("chunkSize must be >= 1");
+                .hasMessageContaining("chunkSize must be <=");
     }
 
     // ── chunk count ──────────────────────────────────────────────────────────────

@@ -47,6 +47,14 @@ public final class ChunkStateTracker {
     }
 
     /**
+     * Unconditionally sets {@code id} to {@code state}. Used on failure paths where
+     * the chunk may be IN_FLIGHT or VERIFYING depending on where the attempt died.
+     */
+    public void reset(ChunkId id, ChunkState state) {
+        states.put(id, state);
+    }
+
+    /**
      * Returns the current state of {@code id}, or {@link ChunkState#MISSING}
      * if it has never been {@link #initialize(ChunkId) initialized}.
      */

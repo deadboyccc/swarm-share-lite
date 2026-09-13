@@ -11,6 +11,7 @@ import io.swarmshare.core.domain.Manifest;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -66,6 +67,9 @@ public final class ManifestSerializer {
      * each chunk's {@link ChunkId} from the DTO's flat {@code fileHash} + {@code index}.
      */
     private static Manifest fromDto(ManifestDto dto) {
+        if (dto.chunks() == null) {
+            throw new UncheckedIOException(new IOException("Manifest JSON is missing the chunks array"));
+        }
         List<ChunkDescriptor> descriptors = dto.chunks().stream()
                 .map(cd -> new ChunkDescriptor(
                         new ChunkId(dto.fileHash(), cd.index()),
@@ -88,11 +92,15 @@ public final class ManifestSerializer {
      * readability — manifests are tiny relative to the files they describe.
      *
      * @param manifest   the manifest to write
-     * @param outputPath destination path; parent directories must exist
+     * @param outputPath destination path; missing parent directories are created
      * @throws UncheckedIOException if the file cannot be written
      */
     public void write(Manifest manifest, Path outputPath) {
         try {
+            Path parent = outputPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
             MAPPER.writeValue(outputPath.toFile(), toDto(manifest));
         } catch (IOException e) {
             throw new UncheckedIOException(

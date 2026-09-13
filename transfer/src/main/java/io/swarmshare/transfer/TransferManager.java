@@ -5,12 +5,16 @@ import io.swarmshare.core.crypto.Sha256;
 import io.swarmshare.core.domain.*;
 import io.swarmshare.core.port.PeerConnector;
 import io.swarmshare.core.port.StorageProvider;
+import io.swarmshare.manifest.ManifestValidator;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.time.Duration;
 import java.util.BitSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -28,16 +32,17 @@ public final class TransferManager {
      * Maximum number of chunk downloads allowed in flight at once, across all peers.
      */
     private static final int MAX_INFLIGHT = 32;
-    /**
-     * Maximum download attempts per chunk before giving up on it entirely.
-     */
-    private static final int MAX_RETRIES = 3;
+
+    static final RetryPolicy DEFAULT_RETRY_POLICY =
+            new RetryPolicy(3, Duration.ofMillis(100), Duration.ofSeconds(2));
 
     private final Manifest manifest;
     private final List<PeerInfo> peers;
     private final StorageProvider storage;
     private final PeerConnector connector;
     private final HasherPort verifier;
+    private final Sha256 fileHasher = new Sha256();
+    private final RetryPolicy retryPolicy;
     private final ChunkStateTracker stateTracker;
     /**
      * Bounds concurrent downloads to {@link #MAX_INFLIGHT} to avoid saturating network buffers.
@@ -49,25 +54,32 @@ public final class TransferManager {
     private final BitSet heldChunks;
 
     /**
-     * Creates a manager using the default SHA-256 verifier.
+     * Creates a manager using the default SHA-256 verifier and retry policy.
      */
     public TransferManager(Manifest manifest, List<PeerInfo> peers,
                            StorageProvider storage, PeerConnector connector) {
-        this(manifest, peers, storage, connector, new Sha256());
+        this(manifest, peers, storage, connector, new Sha256(), DEFAULT_RETRY_POLICY);
     }
 
     /**
      * Package-private constructor allowing tests to inject a fake {@link HasherPort}
-     * instead of real SHA-256 verification.
+     * and a {@link RetryPolicy} with zero delay.
      */
     TransferManager(Manifest manifest, List<PeerInfo> peers,
                     StorageProvider storage, PeerConnector connector,
                     HasherPort verifier) {
+        this(manifest, peers, storage, connector, verifier, DEFAULT_RETRY_POLICY);
+    }
+
+    TransferManager(Manifest manifest, List<PeerInfo> peers,
+                    StorageProvider storage, PeerConnector connector,
+                    HasherPort verifier, RetryPolicy retryPolicy) {
         this.manifest = manifest;
         this.peers = List.copyOf(peers);
         this.storage = storage;
         this.connector = connector;
         this.verifier = verifier;
+        this.retryPolicy = retryPolicy;
         this.stateTracker = new ChunkStateTracker();
         this.heldChunks = new BitSet(manifest.totalChunks());
     }
@@ -78,10 +90,19 @@ public final class TransferManager {
      * maps, then downloads every remaining chunk in parallel (one virtual
      * thread per chunk) before verifying the file is complete.
      *
-     * @throws IllegalStateException if any chunk is still missing once all
-     *                               downloads have finished or been abandoned
+     * @throws IllegalArgumentException if the manifest is internally inconsistent
+     * @throws IllegalStateException    if any chunk is still missing once all
+     *                                 downloads have finished or been abandoned,
+     *                                 or if the assembled file hash does not match
      */
     public void start() {
+        switch (ManifestValidator.validate(manifest)) {
+            case ManifestValidator.ValidationResult.Valid ignored -> {
+            }
+            case ManifestValidator.ValidationResult.Invalid invalid ->
+                    throw new IllegalArgumentException("Invalid manifest:\n" + invalid.summary());
+        }
+
         storage.preallocateSpace(manifest.totalSize());
 
         // Resume support: chunks already correct on disk are marked WRITTEN
@@ -123,7 +144,7 @@ public final class TransferManager {
     }
 
     /**
-     * Downloads a single chunk, retrying up to {@link #MAX_RETRIES} times on
+     * Downloads a single chunk, retrying according to {@link #retryPolicy} on
      * either a checksum mismatch or a network/IO exception. Each retry may
      * switch to a different peer via {@link #nextPeerAfterFailure}. Runs the
      * full attempt loop on whichever virtual thread called it, acquiring
@@ -134,55 +155,103 @@ public final class TransferManager {
         int attempts = 0;
         PeerInfo source = initial;
 
-        while (attempts < MAX_RETRIES) {
-            // Block (parking the virtual thread cheaply) until a download slot frees up.
+        while (retryPolicy.shouldRetry(attempts)) {
+            attempts++;
             inflightLimit.acquireUninterruptibly();
             try {
-                stateTracker.transition(desc.id(), ChunkState.SCHEDULED, ChunkState.IN_FLIGHT);
-                byte[] data = connector.fetchChunkAsync(source, desc.id(), desc.size()).join();
-
-                stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.VERIFYING);
-
-                if (verifier.verify(data, desc.sha256())) {
-                    storage.writeChunk(desc.id(), desc.offset(), data);
-                    stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.WRITTEN);
-                    // heldChunks is shared across all downloader threads; synchronize
-                    // the mutation so verifyCompleteFile() and heldChunks() see a
-                    // consistent snapshot.
-                    synchronized (heldChunks) {
-                        heldChunks.set(desc.id().index());
+                TransferResult result = fetchAndVerify(desc, source);
+                switch (result) {
+                    case TransferResult.Success(_, byte[] data) -> {
+                        storage.writeChunk(desc.id(), desc.offset(), data);
+                        stateTracker.transition(desc.id(), ChunkState.VERIFIED, ChunkState.WRITTEN);
+                        synchronized (heldChunks) {
+                            heldChunks.set(desc.id().index());
+                        }
+                        return;
                     }
-                    return;
+                    case TransferResult.Failure(_, String reason, boolean shouldRetry) -> {
+                        LOG.log(Level.DEBUG, "Chunk {0} attempt {1} failed: {2}",
+                                desc.id().index(), attempts, reason);
+                        if (!shouldRetry) {
+                            stateTracker.reset(desc.id(), ChunkState.MISSING);
+                            LOG.log(Level.ERROR, "FAILED: chunk {0} after {1} attempts",
+                                    desc.id().index(), attempts);
+                            return;
+                        }
+                        source = scheduleRetry(desc, source, pieceMaps);
+                        if (source == null) {
+                            stateTracker.reset(desc.id(), ChunkState.MISSING);
+                            LOG.log(Level.ERROR, "FAILED: chunk {0} after {1} attempts",
+                                    desc.id().index(), attempts);
+                            return;
+                        }
+                    }
                 }
-
-                // Verification failed: mark missing and pick an alternative peer
-                stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.MISSING);
-                stateTracker.incrementFailure(desc.id());
-                source = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
-                if (source == null)
-                    break;
-                stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
-
             } catch (Exception e) {
-                // Covers network failures, timeouts, and any unchecked exception from
-                // fetchChunkAsync/join — treated the same as a bad chunk: retry with
-                // another peer if one is available.
                 LOG.log(Level.DEBUG, "Chunk {0} attempt {1} failed: {2}",
                         desc.id().index(), attempts, e.getMessage());
-                stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.MISSING);
-                stateTracker.incrementFailure(desc.id());
-                source = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
-                if (source == null)
-                    break;
-                stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
+                source = scheduleRetry(desc, source, pieceMaps);
+                if (source == null) {
+                    stateTracker.reset(desc.id(), ChunkState.MISSING);
+                    LOG.log(Level.ERROR, "FAILED: chunk {0} after {1} attempts",
+                            desc.id().index(), attempts);
+                    return;
+                }
             } finally {
-                // Always release, whether the attempt succeeded, failed, or threw.
                 inflightLimit.release();
             }
-            attempts++;
+
+            if (retryPolicy.shouldRetry(attempts)) {
+                try {
+                    retryPolicy.sleep(attempts - 1);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    stateTracker.reset(desc.id(), ChunkState.MISSING);
+                    return;
+                }
+            }
         }
 
+        stateTracker.reset(desc.id(), ChunkState.MISSING);
         LOG.log(Level.ERROR, "FAILED: chunk {0} after {1} attempts", desc.id().index(), attempts);
+    }
+
+    /**
+     * Fetches one chunk and checksums it. Write failures are handled by the caller
+     * so a disk error after {@link ChunkState#VERIFIED} can still be retried.
+     */
+    private TransferResult fetchAndVerify(ChunkDescriptor desc, PeerInfo source) {
+        try {
+            stateTracker.transition(desc.id(), ChunkState.SCHEDULED, ChunkState.IN_FLIGHT);
+            byte[] data = connector.fetchChunkAsync(source, desc.id(), desc.size()).join();
+            stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.VERIFYING);
+            if (!verifier.verify(data, desc.sha256())) {
+                return new TransferResult.Failure(desc.id(), "checksum mismatch", true);
+            }
+            stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.VERIFIED);
+            return new TransferResult.Success(desc.id(), data);
+        } catch (Exception e) {
+            return new TransferResult.Failure(desc.id(), String.valueOf(e.getMessage()), true);
+        }
+    }
+
+    /**
+     * Resets the chunk to {@link ChunkState#SCHEDULED} after a failed attempt so
+     * the next loop iteration can transition SCHEDULED → IN_FLIGHT. Uses
+     * {@link ChunkStateTracker#reset} because the current state may be IN_FLIGHT
+     * (network error) or VERIFYING/VERIFIED (hash/write error).
+     *
+     * @return the peer to use for the next attempt, or {@code null} if none remains
+     */
+    private PeerInfo scheduleRetry(ChunkDescriptor desc, PeerInfo source,
+                                   Map<PeerInfo, BitSet> pieceMaps) {
+        stateTracker.incrementFailure(desc.id());
+        PeerInfo next = nextPeerAfterFailure(desc.id().index(), source, pieceMaps);
+        if (next == null) {
+            return null;
+        }
+        stateTracker.reset(desc.id(), ChunkState.SCHEDULED);
+        return next;
     }
 
     /**
@@ -195,18 +264,12 @@ public final class TransferManager {
         List<CompletableFuture<Void>> futures = peers.stream()
                 .map(peer -> connector.fetchPieceMapAsync(peer, manifest.fileHash())
                         .thenAccept(bitset -> result.put(peer, bitset))
-                        // Swallow individual peer failures here; a peer that never
-                        // answers just won't be considered a source for any chunk.
                         .exceptionally(_ -> null))
                 .toList();
         CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
         return result;
     }
 
-    /**
-     * Picks the first peer (in iteration order) known to advertise the given
-     * chunk index, or {@code null} if none do.
-     */
     private PeerInfo selectPeer(int chunkIndex, Map<PeerInfo, BitSet> pieceMaps) {
         return pieceMaps.entrySet().stream()
                 .filter(e -> e.getValue().get(chunkIndex))
@@ -215,10 +278,6 @@ public final class TransferManager {
                 .orElse(null);
     }
 
-    /**
-     * Like {@link #selectPeer}, but excludes a specific peer — used to avoid
-     * immediately retrying against the peer that just failed.
-     */
     private PeerInfo selectAlternativePeer(int chunkIndex, PeerInfo exclude,
                                            Map<PeerInfo, BitSet> pieceMaps) {
         return pieceMaps.entrySet().stream()
@@ -229,13 +288,6 @@ public final class TransferManager {
                 .orElse(null);
     }
 
-    /**
-     * Chooses where to source a retry after a failed attempt. Prefers a peer
-     * other than the one that just failed; if none exists but the same peer
-     * still advertises the chunk, retries against it rather than giving up —
-     * a checksum mismatch or I/O error may be transient rather than a sign
-     * the peer's copy is bad.
-     */
     private PeerInfo nextPeerAfterFailure(int chunkIndex, PeerInfo current,
                                           Map<PeerInfo, BitSet> pieceMaps) {
         PeerInfo alternative = selectAlternativePeer(chunkIndex, current, pieceMaps);
@@ -247,28 +299,58 @@ public final class TransferManager {
     }
 
     /**
-     * Confirms every chunk in the manifest ended up in {@link #heldChunks}.
-     * Called once after all download tasks have finished (successfully or not).
-     *
-     * @throws IllegalStateException if one or more chunks never got downloaded/verified
+     * Confirms every chunk is held, flushes storage, then re-hashes the assembled
+     * file against {@link Manifest#fileHash()}.
      */
     private void verifyCompleteFile() {
-        long missing = manifest.chunks().stream()
-                .filter(desc -> !heldChunks.get(desc.id().index()))
-                .count();
+        long missing;
+        synchronized (heldChunks) {
+            missing = manifest.chunks().stream()
+                    .filter(desc -> !heldChunks.get(desc.id().index()))
+                    .count();
+        }
         if (missing > 0) {
             throw new IllegalStateException(
                     "Transfer incomplete: " + missing + " of " + manifest.totalChunks() + " chunks missing");
         }
-        LOG.log(Level.INFO, "Transfer complete. All {0} chunks verified.", manifest.totalChunks());
+
+        storage.flush();
+        String actual = fileHasher.compute(chunkBytesInOrder());
+        if (!fileHasher.hashesMatch(actual, manifest.fileHash())) {
+            throw new IllegalStateException(
+                    "Transfer complete but file hash mismatch: expected "
+                            + manifest.fileHash() + " got " + actual);
+        }
+        LOG.log(Level.INFO, "Transfer complete. All {0} chunks verified. fileHash={1}",
+                manifest.totalChunks(), manifest.fileHash());
+    }
+
+    private Iterator<byte[]> chunkBytesInOrder() {
+        return new Iterator<>() {
+            private int index = 0;
+
+            @Override
+            public boolean hasNext() {
+                return index < manifest.totalChunks();
+            }
+
+            @Override
+            public byte[] next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
+                ChunkDescriptor desc = manifest.chunkAt(index++);
+                return storage.readChunk(desc.id(), desc.offset(), desc.size())
+                        .orElseThrow(() -> new IllegalStateException(
+                                "Chunk " + desc.id().index() + " missing during file-hash verification"));
+            }
+        };
     }
 
     /**
      * Exposed for tests.
      */
     BitSet heldChunks() {
-        // Return a defensive copy so tests can't mutate internal state, taken
-        // under the same lock used by downloadWithRetry for a consistent snapshot.
         synchronized (heldChunks) {
             return (BitSet) heldChunks.clone();
         }

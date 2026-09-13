@@ -38,8 +38,8 @@
 ```mermaid
 graph TB
     subgraph CLI["CLI Layer"]
-        Main["Main.java<br/>(seed, build-manifest)"]
-        SeederFS["SeederFileStorage<br/>(read-only provider)"]
+        Main["Main.java<br/>(seed, build-manifest, download)"]
+        FCS_CLI["FileChannelStorage"]
     end
     
     subgraph Transfer["Transfer/Orchestration Layer"]
@@ -75,7 +75,7 @@ graph TB
     end
     
     Main -->|orchestrates| TM
-    Main -->|provides| SeederFS
+    Main -->|reads/writes files| FCS_CLI
     
     TM -->|coordinates| TCS
     TM -->|fetches via| TPC

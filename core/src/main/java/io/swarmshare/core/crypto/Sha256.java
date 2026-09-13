@@ -3,6 +3,8 @@ package io.swarmshare.core.crypto;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.Iterator;
+import java.util.Locale;
 
 /**
  * Stateless chunk integrity verifier using SHA-256.
@@ -49,7 +51,7 @@ public final class Sha256 implements HasherPort {
 
         byte[] expected;
         try {
-            expected = HEX.parseHex(expectedHex.toLowerCase());
+            expected = HEX.parseHex(expectedHex.toLowerCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             // expectedHex is not valid hex — treat as mismatch, not an exception
             return false;
@@ -57,6 +59,38 @@ public final class Sha256 implements HasherPort {
 
         // Constant-time comparison; prevents timing oracle on partial hash matches
         return MessageDigest.isEqual(digest(data), expected);
+    }
+
+    /**
+     * SHA-256 of {@code parts} concatenated in iterator order, without assembling
+     * them into a single array. Used for the whole-file hash after download.
+     */
+    public String compute(Iterator<byte[]> parts) {
+        try {
+            MessageDigest md = MessageDigest.getInstance(ALGORITHM);
+            while (parts.hasNext()) {
+                md.update(parts.next());
+            }
+            return HEX.formatHex(md.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new AssertionError("SHA-256 not available on this JVM", e);
+        }
+    }
+
+    /**
+     * Constant-time comparison of two hex-encoded SHA-256 strings.
+     */
+    public boolean hashesMatch(String actualHex, String expectedHex) {
+        if (actualHex == null || expectedHex == null || actualHex.isBlank() || expectedHex.isBlank()) {
+            return false;
+        }
+        try {
+            byte[] actual = HEX.parseHex(actualHex.toLowerCase(Locale.ROOT));
+            byte[] expected = HEX.parseHex(expectedHex.toLowerCase(Locale.ROOT));
+            return MessageDigest.isEqual(actual, expected);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     // ── internal ────────────────────────────────────────────────────────────────

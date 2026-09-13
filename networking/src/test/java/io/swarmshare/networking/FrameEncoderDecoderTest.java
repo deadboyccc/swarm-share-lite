@@ -87,4 +87,41 @@ class FrameEncoderDecoderTest {
                 .isInstanceOf(java.io.IOException.class)
                 .hasMessageContaining("Stream ended");
     }
+
+    @Test
+    void readExactly_throwsOnNegativeLength() {
+        var in = new DataInputStream(new ByteArrayInputStream(new byte[0]));
+        assertThatThrownBy(() -> FrameDecoder.readExactly(in, -1))
+                .isInstanceOf(java.io.IOException.class)
+                .hasMessageContaining("Invalid length");
+    }
+
+    @Test
+    void readExactly_throwsOnZeroLengthRead() {
+        var stalling = new java.io.InputStream() {
+            @Override
+            public int read() {
+                return 0;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) {
+                return 0;
+            }
+        };
+        var in = new DataInputStream(stalling);
+        assertThatThrownBy(() -> FrameDecoder.readExactly(in, 4))
+                .isInstanceOf(java.io.IOException.class)
+                .hasMessageContaining("Stream ended");
+    }
+
+    @Test
+    void readChunkRequest_throwsOnOversizedHashLength() {
+        var in = new DataInputStream(new ByteArrayInputStream(new byte[] {
+                0, 0, 4, 0 // hashLen = 1024, above MAX_HASH_BYTES
+        }));
+        assertThatThrownBy(() -> FrameDecoder.readChunkRequest(in))
+                .isInstanceOf(java.io.IOException.class)
+                .hasMessageContaining("Invalid manifest hash length");
+    }
 }
