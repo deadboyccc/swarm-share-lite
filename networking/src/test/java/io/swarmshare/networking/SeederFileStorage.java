@@ -44,7 +44,7 @@ final class SeederFileStorage implements StorageProvider, Closeable {
         try {
             while (buffer.hasRemaining()) {
                 int n = channel.read(buffer, offset + buffer.position());
-                if (n == -1) return Optional.empty();
+                if (n <= 0) return Optional.empty();
             }
             return Optional.of(buffer.array());
         } catch (IOException e) {

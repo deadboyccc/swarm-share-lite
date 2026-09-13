@@ -85,11 +85,11 @@ class TwoNodeIntegrationTest {
             PeerInfo seederPeer = new PeerInfo(
                     UUID.randomUUID(), new InetSocketAddress("localhost", server.localPort()));
 
-            var outStorage = new FileChannelStorage(outFile);
-            var connector = new TcpPeerConnector();
-            var manager = new TransferManager(manifest, List.of(seederPeer), outStorage, connector);
-            manager.start();
-            outStorage.close();
+            try (var outStorage = new FileChannelStorage(outFile);
+                 var connector = new TcpPeerConnector()) {
+                var manager = new TransferManager(manifest, List.of(seederPeer), outStorage, connector);
+                manager.start();
+            }
 
             assertThat(Files.readAllBytes(outFile)).isEqualTo(data);
         }

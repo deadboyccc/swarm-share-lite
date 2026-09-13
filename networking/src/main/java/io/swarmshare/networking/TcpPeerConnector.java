@@ -10,8 +10,9 @@ import java.io.IOException;
 import java.net.Socket;
 import java.util.BitSet;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * {@link PeerConnector} implementation over plain TCP binary framing.
@@ -25,19 +26,22 @@ import java.util.concurrent.Executors;
  * both
  * connect and read operations to avoid indefinite blocking.
  */
-public final class TcpPeerConnector implements PeerConnector {
+public final class TcpPeerConnector implements PeerConnector, AutoCloseable {
 
     /**
      * Connect and read timeout, in milliseconds, applied to every socket operation.
      */
     private static final int TIMEOUT_MS = 10_000;
+    /**
+     * Upper bound on a piece-map payload. A BitSet of this many bytes can describe
+     * 8 million chunks — far beyond v1 file sizes — while rejecting hostile lengths.
+     */
+    private static final int MAX_PIECE_MAP_BYTES = 1_048_576;
 
     /**
-     * Runs each fetch on its own virtual thread. Since every request opens a
-     * blocking socket and waits on I/O, virtual threads let us issue many
-     * concurrent peer requests without paying for one platform thread each.
+     * Runs each fetch on its own virtual thread. Closed by {@link #close()}.
      */
-    private static final Executor VIRTUAL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
      * Fetches a single chunk's bytes from a peer over a dedicated TCP connection.
@@ -77,6 +81,9 @@ public final class TcpPeerConnector implements PeerConnector {
                     throw new IOException("Peer returned status 0x%02x for chunk %d"
                             .formatted(status, id.index()));
                 }
+                if (dataLen < 0) {
+                    throw new IOException("Peer sent negative payload length: " + dataLen);
+                }
                 // Guard against a peer sending a different amount of data than
                 // the caller expects for this chunk (e.g. stale/corrupt manifest).
                 if (dataLen != size) {
@@ -90,7 +97,7 @@ public final class TcpPeerConnector implements PeerConnector {
                 // which does not support checked exceptions in supplyAsync.
                 throw new RuntimeException("Chunk fetch failed: " + id, e);
             }
-        }, VIRTUAL_EXECUTOR);
+        }, virtualExecutor);
     }
 
     /**
@@ -127,6 +134,9 @@ public final class TcpPeerConnector implements PeerConnector {
                 if (status != FrameEncoder.STATUS_OK) {
                     throw new IOException("PieceMap request failed with status 0x%02x".formatted(status));
                 }
+                if (dataLen < 0 || dataLen > MAX_PIECE_MAP_BYTES) {
+                    throw new IOException("Invalid piece-map length: " + dataLen);
+                }
 
                 // Deserialize the raw bytes back into a BitSet using the same
                 // encoding the peer used to produce them (BitSet.valueOf/toByteArray).
@@ -135,6 +145,19 @@ public final class TcpPeerConnector implements PeerConnector {
             } catch (IOException e) {
                 throw new RuntimeException("PieceMap fetch failed for peer: " + peer.id(), e);
             }
-        }, VIRTUAL_EXECUTOR);
+        }, virtualExecutor);
+    }
+
+    /**
+     * Stops the virtual-thread executor used for outbound fetches.
+     */
+    @Override
+    public void close() {
+        virtualExecutor.shutdownNow();
+        try {
+            virtualExecutor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

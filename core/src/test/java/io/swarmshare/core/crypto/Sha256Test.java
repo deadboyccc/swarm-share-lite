@@ -127,6 +127,21 @@ class Sha256Test {
     }
 
     @Test
+    void compute_iterator_matchesConcatenatedBytes() {
+        byte[] a = bytes("hello ");
+        byte[] b = bytes("world");
+        String streamed = verifier.compute(java.util.List.of(a, b).iterator());
+        assertThat(streamed).isEqualTo(verifier.compute(bytes("hello world")));
+    }
+
+    @Test
+    void hashesMatch_sameHex_returnsTrue() {
+        String hash = verifier.compute(bytes("file"));
+        assertThat(verifier.hashesMatch(hash, hash.toUpperCase())).isTrue();
+        assertThat(verifier.hashesMatch(hash, "0".repeat(64))).isFalse();
+    }
+
+    @Test
     void compute_concurrentVirtualThreads_allProduceCorrectHashes() throws InterruptedException {
         record Payload(byte[] data, String expected) {
         }

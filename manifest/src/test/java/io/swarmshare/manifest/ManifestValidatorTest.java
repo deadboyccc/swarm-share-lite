@@ -328,4 +328,17 @@ class ManifestValidatorTest {
                                 .as("ManifestBuilder should always produce a valid manifest")
                                 .isInstanceOf(ValidationResult.Valid.class);
         }
+
+        @Test
+        void validate_chunkSizeAboveMax_returnsInvalid() {
+                int tooBig = ManifestBuilder.MAX_CHUNK_SIZE + 1;
+                Manifest manifest = new Manifest(VALID_HASH, "file.bin", tooBig, tooBig,
+                                List.of(chunk(VALID_HASH, 0, 0L, tooBig)));
+
+                ValidationResult result = ManifestValidator.validate(manifest);
+
+                assertThat(result).isInstanceOf(ValidationResult.Invalid.class);
+                assertThat(((ValidationResult.Invalid) result).summary())
+                                .contains("exceeds maximum");
+        }
 }

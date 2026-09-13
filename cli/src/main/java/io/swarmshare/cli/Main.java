@@ -4,6 +4,7 @@ import io.swarmshare.core.domain.Manifest;
 import io.swarmshare.core.domain.PeerInfo;
 import io.swarmshare.manifest.ManifestBuilder;
 import io.swarmshare.manifest.ManifestSerializer;
+import io.swarmshare.manifest.ManifestValidator;
 import io.swarmshare.networking.TcpChunkServer;
 import io.swarmshare.networking.TcpPeerConnector;
 import io.swarmshare.storage.FileChannelStorage;
@@ -105,29 +106,37 @@ public final class Main implements Runnable {
             // write path, so no preallocation or resume logic is needed here.
             try (var storage = new FileChannelStorage(file);
                     var server = new TcpChunkServer(port, storage, manifest, heldChunksFor(manifest))) {
-                // The full file is already on disk, so every chunk is held from the start.
                 Thread serverThread = Thread.startVirtualThread(() -> {
                     try {
                         server.start();
-                    } catch (java.io.IOException ignored) {
-                        // server closed
+                    } catch (java.io.IOException e) {
+                        LOG.log(Level.ERROR, "Seeder failed to start: {0}", e.getMessage());
                     }
                 });
 
-                // Poll until the server has bound its socket, so we can report the actual port.
                 long deadline = System.currentTimeMillis() + 5_000;
+                boolean bound = false;
                 while (System.currentTimeMillis() < deadline) {
                     try {
                         int boundPort = server.localPort();
                         LOG.log(Level.INFO, "Seeder running. fileHash={0} port={1}", manifest.fileHash(), boundPort);
+                        bound = true;
                         break;
                     } catch (IllegalStateException ignored) {
-                        Thread.sleep(50);
+                        try {
+                            Thread.sleep(50);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw e;
+                        }
                     }
+                }
+                if (!bound) {
+                    server.close();
+                    throw new IllegalStateException("Seeder did not bind to port " + port + " within 5 seconds");
                 }
 
                 try {
-                    // Block until the server thread exits (server closed/interrupted).
                     serverThread.join();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -200,13 +209,19 @@ public final class Main implements Runnable {
         @Override
         public Integer call() throws Exception {
             Manifest manifest = new ManifestSerializer().read(manifestFile);
+            switch (ManifestValidator.validate(manifest)) {
+                case ManifestValidator.ValidationResult.Valid ignored -> {
+                }
+                case ManifestValidator.ValidationResult.Invalid invalid ->
+                        throw new IllegalArgumentException("Invalid manifest:\n" + invalid.summary());
+            }
 
             List<PeerInfo> peers = peerAddresses.stream()
                     .map(DownloadCommand::parsePeer)
                     .toList();
 
-            try (var storage = new FileChannelStorage(output)) {
-                var connector = new TcpPeerConnector();
+            try (var storage = new FileChannelStorage(output);
+                 var connector = new TcpPeerConnector()) {
                 var manager = new TransferManager(manifest, peers, storage, connector);
 
                 LOG.log(Level.INFO, "Downloading {0} ({1} chunks) from {2} peer(s)...",
@@ -220,12 +235,25 @@ public final class Main implements Runnable {
             return 0;
         }
 
-        private static PeerInfo parsePeer(String hostPort) {
-            String[] parts = hostPort.split(":", 2);
-            if (parts.length != 2) {
+        static PeerInfo parsePeer(String hostPort) {
+            int colon = hostPort.lastIndexOf(':');
+            if (colon <= 0 || colon == hostPort.length() - 1) {
                 throw new IllegalArgumentException("Expected host:port, got: " + hostPort);
             }
-            var address = new InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
+            String host = hostPort.substring(0, colon);
+            if (host.startsWith("[") && host.endsWith("]") && host.length() > 2) {
+                host = host.substring(1, host.length() - 1);
+            }
+            int port;
+            try {
+                port = Integer.parseInt(hostPort.substring(colon + 1));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Expected host:port, got: " + hostPort, e);
+            }
+            if (port < 1 || port > 65535) {
+                throw new IllegalArgumentException("Port out of range: " + port);
+            }
+            var address = new InetSocketAddress(host, port);
             return new PeerInfo(UUID.randomUUID(), address);
         }
     }

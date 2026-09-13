@@ -69,6 +69,10 @@ public final class ManifestValidator {
         if (isBlank(manifest.fileName())) out.add("fileName must not be blank");
         if (manifest.totalSize() <= 0) out.add("totalSize must be positive, got: " + manifest.totalSize());
         if (manifest.chunkSize() <= 0) out.add("chunkSize must be positive, got: " + manifest.chunkSize());
+        if (manifest.chunkSize() > ManifestBuilder.MAX_CHUNK_SIZE) {
+            out.add("chunkSize exceeds maximum of " + ManifestBuilder.MAX_CHUNK_SIZE
+                    + ", got: " + manifest.chunkSize());
+        }
     }
 
     /**
@@ -112,6 +116,9 @@ public final class ManifestValidator {
             // Positive size
             if (desc.size() <= 0) {
                 out.add("chunk %d has non-positive size: %d".formatted(i, desc.size()));
+            } else if (desc.size() > ManifestBuilder.MAX_CHUNK_SIZE) {
+                out.add("chunk %d size %d exceeds maximum of %d"
+                        .formatted(i, desc.size(), ManifestBuilder.MAX_CHUNK_SIZE));
             }
 
             // Offset correctness

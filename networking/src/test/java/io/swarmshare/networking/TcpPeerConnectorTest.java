@@ -44,13 +44,14 @@ class TcpPeerConnectorTest {
     });
 
     PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", server.getLocalPort()));
-    var connector = new TcpPeerConnector();
+    try (var connector = new TcpPeerConnector()) {
 
     ChunkId id = new ChunkId("deadbeef", 0);
 
     assertThatThrownBy(() -> connector.fetchChunkAsync(peer, id, 10).join())
         .isInstanceOf(RuntimeException.class)
         .hasMessageContaining("Chunk fetch failed");
+    }
   }
 
   @Test
@@ -85,9 +86,10 @@ class TcpPeerConnectorTest {
     });
 
     PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", server.getLocalPort()));
-    var connector = new TcpPeerConnector();
+    try (var connector = new TcpPeerConnector()) {
     BitSet result = connector.fetchPieceMapAsync(peer, "ignored").join();
     assertThat(result.get(1)).isTrue();
     assertThat(result.get(5)).isTrue();
+    }
   }
 }

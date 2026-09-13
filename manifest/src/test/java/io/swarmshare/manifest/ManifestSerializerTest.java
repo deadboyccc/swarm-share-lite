@@ -84,6 +84,14 @@ class ManifestSerializerTest {
     }
 
     @Test
+    void write_createsMissingParentDirectories() {
+        Path jsonFile = tempDir.resolve("nested").resolve("dir").resolve("manifest.json");
+        serializer.write(singleChunkManifest(), jsonFile);
+        assertThat(jsonFile).exists();
+        assertThat(serializer.read(jsonFile).fileName()).isEqualTo("ubuntu.iso");
+    }
+
+    @Test
     void writeAndRead_twoChunks_allChunkDescriptorsRestored() {
         Path jsonFile = tempDir.resolve("manifest2.json");
         Manifest original = twoChunkManifest();
@@ -258,5 +266,20 @@ class ManifestSerializerTest {
     void fromJson_emptyString_throwsUncheckedIOException() {
         assertThatThrownBy(() -> serializer.fromJson(""))
                 .isInstanceOf(java.io.UncheckedIOException.class);
+    }
+
+    @Test
+    void fromJson_missingChunks_throwsUncheckedIOException() {
+        String json = """
+                {
+                  "fileHash": "abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+                  "fileName": "ubuntu.iso",
+                  "totalSize": 1024,
+                  "chunkSize": 1024
+                }
+                """;
+        assertThatThrownBy(() -> serializer.fromJson(json))
+                .isInstanceOf(java.io.UncheckedIOException.class)
+                .hasMessageContaining("chunks");
     }
 }

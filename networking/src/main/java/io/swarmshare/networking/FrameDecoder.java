@@ -16,6 +16,11 @@ import java.nio.charset.StandardCharsets;
  */
 public final class FrameDecoder {
 
+    /**
+     * SHA-256 hex is 64 characters; allow a modest headroom for future hash encodings.
+     */
+    static final int MAX_HASH_BYTES = 256;
+
     // Static-helpers-only class; no instances needed.
     private FrameDecoder() {
     }
@@ -29,18 +34,21 @@ public final class FrameDecoder {
      * @param in the stream to read from
      * @param n  the exact number of bytes to read
      * @return a newly allocated array of length {@code n} containing the bytes read
-     * @throws IOException if the stream ends before {@code n} bytes have been read
+     * @throws IOException if {@code n} is negative or the stream ends before {@code n} bytes have been read
      */
     public static byte[] readExactly(DataInputStream in, int n) throws IOException {
+        if (n < 0) {
+            throw new IOException("Invalid length: " + n);
+        }
         byte[] buf = new byte[n];
         int offset = 0;
         // A single read() call over TCP may return fewer bytes than requested,
         // so we keep reading into the remaining slice of the buffer until it's full.
         while (offset < n) {
             int read = in.read(buf, offset, n - offset);
-            if (read == -1) {
-                // -1 means the peer closed the connection mid-frame; treat as
-                // an error rather than silently returning a short buffer.
+            if (read <= 0) {
+                // -1: peer closed mid-frame. 0: no progress with bytes still needed —
+                // looping would spin forever.
                 throw new IOException("Stream ended before " + n + " bytes read (got " + offset + ")");
             }
             offset += read;
@@ -62,9 +70,7 @@ public final class FrameDecoder {
      */
     public static ParsedChunkRequest readChunkRequest(DataInputStream in) throws IOException {
         int hashLen = in.readInt();
-        // Guard against a corrupt/malicious length that would otherwise cause
-        // readExactly to attempt allocating a negative-sized array.
-        if (hashLen < 0)
+        if (hashLen < 0 || hashLen > MAX_HASH_BYTES)
             throw new IOException("Invalid manifest hash length: " + hashLen);
         // Manifest hash is length-prefixed UTF-8 string
         String manifestHash = new String(readExactly(in, hashLen), StandardCharsets.UTF_8);
@@ -85,7 +91,7 @@ public final class FrameDecoder {
      */
     public static String readPieceMapRequest(DataInputStream in) throws IOException {
         int hashLen = in.readInt();
-        if (hashLen < 0)
+        if (hashLen < 0 || hashLen > MAX_HASH_BYTES)
             throw new IOException("Invalid manifest hash length: " + hashLen);
         // Return the requested manifest hash as UTF-8 string
         return new String(readExactly(in, hashLen), StandardCharsets.UTF_8);

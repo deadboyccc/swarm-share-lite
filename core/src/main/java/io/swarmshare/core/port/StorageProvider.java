@@ -44,4 +44,11 @@ public interface StorageProvider {
      * Returns a BitSet where bit[i] = true means chunk i is verified on disk.
      */
     BitSet checkExistingChunks(Manifest manifest);
+
+    /**
+     * Durably persists writes already made through {@link #writeChunk}.
+     * No-op for in-memory implementations.
+     */
+    default void flush() {
+    }
 }

@@ -1,18 +1,25 @@
 package io.swarmshare.transfer;
 
+import io.swarmshare.core.crypto.Sha256;
 import io.swarmshare.core.domain.*;
+import io.swarmshare.core.port.StorageProvider;
 import io.swarmshare.manifest.ManifestBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.BitSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ChunkStateTrackerTest {
 
@@ -47,6 +54,14 @@ class ChunkStateTrackerTest {
         assertThat(tracker.incrementFailure(id)).isEqualTo(2);
         assertThat(tracker.getFailureCount(id)).isEqualTo(2);
     }
+
+    @Test
+    void reset_overwritesCurrentState() {
+        tracker.initialize(id);
+        tracker.transition(id, ChunkState.MISSING, ChunkState.VERIFYING);
+        tracker.reset(id, ChunkState.SCHEDULED);
+        assertThat(tracker.getState(id)).isEqualTo(ChunkState.SCHEDULED);
+    }
 }
 
 class RetryPolicyTest {
@@ -64,6 +79,12 @@ class RetryPolicyTest {
     }
 
     @Test
+    void delayFor_largeAttempt_doesNotOverflowAndStaysCapped() {
+        assertThat(policy.delayFor(63).toMillis()).isEqualTo(800);
+        assertThat(policy.delayFor(100).toMillis()).isEqualTo(800);
+    }
+
+    @Test
     void shouldRetry_respectsMaxAttempts() {
         assertThat(policy.shouldRetry(0)).isTrue();
         assertThat(policy.shouldRetry(4)).isTrue();
@@ -73,6 +94,9 @@ class RetryPolicyTest {
 
 class TransferManagerTest {
 
+    private static final RetryPolicy NO_WAIT =
+            new RetryPolicy(3, Duration.ZERO, Duration.ZERO);
+
     @TempDir
     Path tempDir;
 
@@ -80,6 +104,15 @@ class TransferManagerTest {
         Path file = Files.createTempFile("transfer-test-", ".bin");
         Files.write(file, fileBytes);
         return new ManifestBuilder(chunkSize).build(file);
+    }
+
+    private static TransferManager manager(Manifest manifest, StorageProvider storage,
+                                            FakePeerConnector connector, PeerInfo peer) {
+        return new TransferManager(manifest, List.of(peer), storage, connector, new Sha256(), NO_WAIT);
+    }
+
+    private static PeerInfo testPeer() {
+        return new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", 9999));
     }
 
     @Test
@@ -92,7 +125,7 @@ class TransferManagerTest {
                 manifest, FakePeerConnector.chunksFromManifest(manifest, fileBytes));
         PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", 9999));
 
-        var manager = new TransferManager(manifest, List.of(peer), storage, connector);
+        var manager = manager(manifest, storage, connector, peer);
         manager.start();
 
         BitSet held = storage.checkExistingChunks(manifest);
@@ -110,7 +143,7 @@ class TransferManagerTest {
                 .corruptOnce(0);
         PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", 9999));
 
-        var manager = new TransferManager(manifest, List.of(peer), storage, connector);
+        var manager = manager(manifest, storage, connector, peer);
         manager.start();
 
         assertThat(storage.checkExistingChunks(manifest).cardinality())
@@ -134,9 +167,99 @@ class TransferManagerTest {
                 manifest, FakePeerConnector.chunksFromManifest(manifest, fileBytes));
         PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", 9999));
 
-        var manager = new TransferManager(manifest, List.of(peer), storage, connector);
+        var manager = manager(manifest, storage, connector, peer);
         manager.start();
 
         assertThat(manager.heldChunks().cardinality()).isEqualTo(manifest.totalChunks());
+    }
+
+    @Test
+    void start_retries_whenWriteFailsAfterVerify() throws Exception {
+        byte[] fileBytes = "retry-after-write-failure".getBytes();
+        Manifest manifest = buildManifest(fileBytes, 12);
+
+        AtomicInteger writes = new AtomicInteger();
+        InMemoryStorage delegate = new InMemoryStorage();
+        StorageProvider storage = new StorageProvider() {
+            @Override
+            public void preallocateSpace(long totalSize) {
+                delegate.preallocateSpace(totalSize);
+            }
+
+            @Override
+            public void writeChunk(ChunkId id, long offset, byte[] data) {
+                if (writes.getAndIncrement() == 0) {
+                    throw new UncheckedIOException("simulated disk full", new IOException("disk full"));
+                }
+                delegate.writeChunk(id, offset, data);
+            }
+
+            @Override
+            public java.util.Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
+                return delegate.readChunk(id, offset, size);
+            }
+
+            @Override
+            public BitSet checkExistingChunks(Manifest manifest) {
+                return delegate.checkExistingChunks(manifest);
+            }
+        };
+        FakePeerConnector connector = new FakePeerConnector(
+                manifest, FakePeerConnector.chunksFromManifest(manifest, fileBytes));
+        PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", 9999));
+
+        var manager = manager(manifest, storage, connector, peer);
+        manager.start();
+
+        assertThat(storage.checkExistingChunks(manifest).cardinality())
+                .isEqualTo(manifest.totalChunks());
+    }
+
+    @Test
+    void start_rejectsInconsistentManifest() {
+        Manifest empty = new Manifest("a".repeat(64), "empty.bin", 100, 100, List.of());
+        InMemoryStorage storage = new InMemoryStorage();
+        FakePeerConnector connector = new FakePeerConnector(empty, java.util.Map.of());
+
+        assertThatThrownBy(() -> manager(empty, storage, connector, testPeer()).start())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Invalid manifest");
+    }
+
+    @Test
+    void start_rejectsWhenAssembledFileHashMismatches() throws Exception {
+        byte[] fileBytes = "file-hash-mismatch".getBytes();
+        Manifest manifest = buildManifest(fileBytes, 8);
+
+        InMemoryStorage delegate = new InMemoryStorage();
+        StorageProvider storage = new StorageProvider() {
+            @Override
+            public void preallocateSpace(long totalSize) {
+                delegate.preallocateSpace(totalSize);
+            }
+
+            @Override
+            public void writeChunk(ChunkId id, long offset, byte[] data) {
+                byte[] corrupted = data.clone();
+                corrupted[0] ^= 0x01;
+                delegate.writeChunk(id, offset, corrupted);
+            }
+
+            @Override
+            public java.util.Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
+                return delegate.readChunk(id, offset, size);
+            }
+
+            @Override
+            public BitSet checkExistingChunks(Manifest manifest) {
+                return new BitSet();
+            }
+        };
+        FakePeerConnector connector = new FakePeerConnector(
+                manifest, FakePeerConnector.chunksFromManifest(manifest, fileBytes));
+
+        assertThatThrownBy(() -> manager(manifest, storage, connector, testPeer()).start())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("file hash mismatch");
     }
 }

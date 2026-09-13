@@ -70,9 +70,10 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      * Creates and pre-allocates the output file to exactly {@code totalSize} bytes.
      *
      * <p>
-     * Writing a single byte at {@code totalSize - 1} forces the OS to actually
-     * reserve the block range on disk, not just update inode metadata as
-     * {@link FileChannel#truncate} alone would on many filesystems.
+     * If the file already exists at {@code totalSize}, contents are left intact so
+     * {@link #checkExistingChunks} can resume a partial download. A dummy last-byte
+     * write is used only when extending a new or shorter file — never on an already
+     * correctly sized file, which would corrupt the last chunk.
      *
      * @param totalSize exact byte size the file must reach before any chunk is
      *                  written
@@ -86,27 +87,51 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
             throw new IllegalArgumentException("totalSize must be positive, got: " + totalSize);
 
         try {
-            // Ensure parent directory exists before opening
-            Files.createDirectories(outputPath.getParent());
+            Path parent = outputPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
 
-            channel = FileChannel.open(
+            FileChannel opened = FileChannel.open(
                     outputPath,
-                    StandardOpenOption.CREATE_NEW, // fail fast if file already exists
+                    StandardOpenOption.CREATE,
                     StandardOpenOption.READ,
                     StandardOpenOption.WRITE);
 
-            // Sets the logical file length; sufficient on some filesystems (e.g. APFS
-            // sparse)
-            channel.truncate(totalSize);
+            try {
+                long currentSize = opened.size();
+                if (currentSize != totalSize) {
+                    opened.truncate(totalSize);
 
-            // Materialise the allocation by writing one byte at the last position.
-            // This converts a sparse extent into an allocated one on ext4, NTFS, etc.
-            channel.write(ByteBuffer.allocate(1), totalSize - 1);
+                    if (currentSize < totalSize) {
+                        // Materialise the allocation by writing one byte at the last position.
+                        // Skip this when shrinking or when the file already had the right size.
+                        opened.write(ByteBuffer.allocate(1), totalSize - 1);
+                    }
 
-            // Flush metadata + data to the storage device for durability
-            channel.force(true);
+                    opened.force(true);
+                }
 
-            LOG.log(Level.INFO, "Pre-allocated {0} bytes at {1}", totalSize, outputPath);
+                FileChannel previous;
+                synchronized (this) {
+                    previous = channel;
+                    channel = opened;
+                }
+                closeQuietly(previous);
+
+                if (currentSize == totalSize) {
+                    LOG.log(Level.INFO, "Reusing existing {0}-byte file at {1}", totalSize, outputPath);
+                } else {
+                    LOG.log(Level.INFO, "Pre-allocated {0} bytes at {1}", totalSize, outputPath);
+                }
+            } catch (IOException e) {
+                try {
+                    opened.close();
+                } catch (IOException suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+                throw e;
+            }
         } catch (IOException e) {
             throw new UncheckedIOException(
                     "Failed to pre-allocate %d bytes at %s".formatted(totalSize, outputPath), e);
@@ -136,13 +161,12 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
         ByteBuffer buffer = ByteBuffer.wrap(data);
         try {
             while (buffer.hasRemaining()) {
-                // Write from buffer.position() bytes into the file at (offset +
-                // bytesWrittenSoFar).
-                // FileChannel.write() returns the number of bytes actually written this call,
-                // and advances buffer.position() by that amount automatically — so the next
-                // iteration naturally picks up where this one left off.
-                ch.write(buffer, offset + buffer.position());
+                int written = ch.write(buffer, offset + buffer.position());
+                if (written <= 0) {
+                    throw new IOException("Zero-length write at offset " + (offset + buffer.position()));
+                }
             }
+            ch.force(true);
         } catch (IOException e) {
             throw new UncheckedIOException(
                     "Failed to write chunk %d (%d bytes) at offset %d".formatted(id.index(), data.length, offset), e);
@@ -169,8 +193,8 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
             FileChannel ch = ensureReadableChannel();
             while (buffer.hasRemaining()) {
                 int n = ch.read(buffer, offset + buffer.position());
-                if (n == -1)
-                    return Optional.empty(); // EOF before we filled the buffer
+                if (n <= 0)
+                    return Optional.empty(); // EOF or no progress before we filled the buffer
             }
             return Optional.of(buffer.array());
         } catch (IOException e) {
@@ -208,6 +232,19 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
         return existing;
     }
 
+    @Override
+    public void flush() {
+        FileChannel ch = channel;
+        if (ch == null || !ch.isOpen()) {
+            return;
+        }
+        try {
+            ch.force(true);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to flush " + outputPath, e);
+        }
+    }
+
     // ── Closeable ────────────────────────────────────────────────────────────────
 
     /**
@@ -224,17 +261,31 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
         if (ch != null && ch.isOpen()) {
             return ch;
         }
-        if (!Files.exists(outputPath)) {
-            throw new IOException("Storage file does not exist: " + outputPath);
+        synchronized (this) {
+            ch = channel;
+            if (ch != null && ch.isOpen()) {
+                return ch;
+            }
+            if (!Files.exists(outputPath)) {
+                throw new IOException("Storage file does not exist: " + outputPath);
+            }
+            ch = FileChannel.open(outputPath, StandardOpenOption.READ);
+            channel = ch;
+            return ch;
         }
-        ch = FileChannel.open(outputPath, StandardOpenOption.READ);
-        channel = ch;
-        return ch;
     }
 
     @Override
     public void close() {
-        FileChannel ch = channel;
+        FileChannel ch;
+        synchronized (this) {
+            ch = channel;
+            channel = null;
+        }
+        closeQuietly(ch);
+    }
+
+    private void closeQuietly(FileChannel ch) {
         if (ch == null || !ch.isOpen())
             return;
         try {
