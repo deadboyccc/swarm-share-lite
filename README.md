@@ -1,6 +1,8 @@
 # swarm-share-lite
 
 [![Java CI with Gradle](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/gradle.yml)
+[![Dependabot Updates](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependabot/dependabot-updates)
+[![Automatic Dependency Submission](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependency-graph/auto-submission/badge.svg)](https://github.com/deadboyccc/swarm-share-lite/actions/workflows/dependency-graph/auto-submission)
 
 > P2P chunk-based file distribution with logarithmic peer scaling.
 
