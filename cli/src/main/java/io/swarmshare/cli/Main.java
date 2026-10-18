@@ -34,8 +34,9 @@ import java.util.concurrent.Callable;
  * writing a manifest JSON file alongside it</li>
  * <li>{@code build-manifest <file> [chunkSize]} — compute, print, and persist
  * a manifest without serving the file</li>
- * <li>{@code download <manifestFile> <output> <peerHost:peerPort>...} — fetch
- * a manifest's chunks from one or more peers and write them to disk</li>
+ * <li>{@code download <manifestFile> <output> <peerHost:peerPort>...}
+ * [{@code --port <listenPort>}] — fetch chunks, optionally serving them
+ * to others as they are verified (peer promotion)</li>
  * </ul>
  */
 @Command(name = "swarm-share", description = "P2P chunk-based file distribution CLI", subcommands = {
@@ -71,6 +72,21 @@ public final class Main implements Runnable {
         BitSet held = new BitSet(manifest.totalChunks());
         held.set(0, manifest.totalChunks());
         return held;
+    }
+
+    /**
+     * Polls until {@code server} has bound, or throws after {@code timeoutMs}.
+     */
+    static int awaitBound(TcpChunkServer server, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                return server.localPort();
+            } catch (IllegalStateException ignored) {
+                Thread.sleep(50);
+            }
+        }
+        throw new IllegalStateException("Server did not bind within " + timeoutMs + " ms");
     }
 
     /**
@@ -114,27 +130,8 @@ public final class Main implements Runnable {
                     }
                 });
 
-                long deadline = System.currentTimeMillis() + 5_000;
-                boolean bound = false;
-                while (System.currentTimeMillis() < deadline) {
-                    try {
-                        int boundPort = server.localPort();
-                        LOG.log(Level.INFO, "Seeder running. fileHash={0} port={1}", manifest.fileHash(), boundPort);
-                        bound = true;
-                        break;
-                    } catch (IllegalStateException ignored) {
-                        try {
-                            Thread.sleep(50);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            throw e;
-                        }
-                    }
-                }
-                if (!bound) {
-                    server.close();
-                    throw new IllegalStateException("Seeder did not bind to port " + port + " within 5 seconds");
-                }
+                int boundPort = awaitBound(server, 5_000);
+                LOG.log(Level.INFO, "Seeder running. fileHash={0} port={1}", manifest.fileHash(), boundPort);
 
                 try {
                     serverThread.join();
@@ -206,6 +203,9 @@ public final class Main implements Runnable {
         @Parameters(index = "2..*", description = "Peers to download from, as host:port")
         private List<String> peerAddresses;
 
+        @Option(names = {"-p", "--port"}, description = "Serve verified chunks on this TCP port (peer promotion)")
+        private Integer listenPort;
+
         @Override
         public Integer call() throws Exception {
             Manifest manifest = new ManifestSerializer().read(manifestFile);
@@ -227,9 +227,26 @@ public final class Main implements Runnable {
                 LOG.log(Level.INFO, "Downloading {0} ({1} chunks) from {2} peer(s)...",
                         manifest.fileName(), manifest.totalChunks(), peers.size());
 
-                manager.start(); // blocks until complete or throws IllegalStateException
+                if (listenPort == null) {
+                    manager.start();
+                    LOG.log(Level.INFO, "Download complete: {0}", output);
+                    return 0;
+                }
 
-                LOG.log(Level.INFO, "Download complete: {0}", output);
+                try (var server = new TcpChunkServer(listenPort, storage, manifest, manager.liveHeldChunks())) {
+                    Thread serverThread = Thread.startVirtualThread(() -> {
+                        try {
+                            server.start();
+                        } catch (java.io.IOException e) {
+                            LOG.log(Level.ERROR, "Leecher server failed: {0}", e.getMessage());
+                        }
+                    });
+                    int boundPort = awaitBound(server, 5_000);
+                    LOG.log(Level.INFO, "Serving verified chunks on port {0}", boundPort);
+                    manager.start();
+                    LOG.log(Level.INFO, "Download complete: {0}. Still serving on port {1}", output, boundPort);
+                    serverThread.join();
+                }
             }
 
             return 0;

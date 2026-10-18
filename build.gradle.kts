@@ -2,6 +2,9 @@ plugins {
     java
 }
 
+import org.gradle.api.plugins.JavaApplication
+
+
 allprojects {
     group   = "io.swarmshare"
     version = "0.1.0-SNAPSHOT"
@@ -46,7 +49,13 @@ project(":transfer")    { dependencies {
     implementation(project(":core"))
     implementation(project(":manifest"))
 } }
-project(":cli")         { dependencies {
+project(":cli")         {
+    apply(plugin = "application")
+    the<JavaApplication>().apply {
+        mainClass.set("io.swarmshare.cli.Main")
+        applicationName = "swarm-share"
+    }
+    dependencies {
     implementation(project(":core"))
     implementation(project(":manifest"))
     implementation(project(":storage"))

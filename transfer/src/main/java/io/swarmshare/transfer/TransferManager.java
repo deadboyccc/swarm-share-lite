@@ -109,7 +109,9 @@ public final class TransferManager {
         // immediately so they're skipped during download, without re-fetching them.
         BitSet existing = storage.checkExistingChunks(manifest);
         existing.stream().forEach(i -> {
-            heldChunks.set(i);
+            synchronized (heldChunks) {
+                heldChunks.set(i);
+            }
             ChunkId id = manifest.chunkAt(i).id();
             stateTracker.initialize(id);
             stateTracker.transition(id, ChunkState.MISSING, ChunkState.WRITTEN);
@@ -348,7 +350,16 @@ public final class TransferManager {
     }
 
     /**
-     * Exposed for tests.
+     * Live piece map shared with {@code TcpChunkServer} so a leecher can serve
+     * chunks as soon as they are written. Callers must synchronize on the
+     * returned set when reading or copying it.
+     */
+    public BitSet liveHeldChunks() {
+        return heldChunks;
+    }
+
+    /**
+     * Snapshot for tests.
      */
     BitSet heldChunks() {
         synchronized (heldChunks) {
