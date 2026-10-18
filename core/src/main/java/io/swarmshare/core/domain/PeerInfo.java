@@ -2,6 +2,7 @@
 package io.swarmshare.core.domain;
 
 import java.net.InetSocketAddress;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -9,6 +10,11 @@ import java.util.UUID;
  * UUID is stable across reconnects (read from config or generated once on first run).
  */
 public record PeerInfo(UUID id, InetSocketAddress address) {
+    public PeerInfo {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(address, "address");
+    }
+
     public String displayAddress() {
         return address.getHostString() + ":" + address.getPort();
     }

@@ -94,4 +94,61 @@ class TwoNodeIntegrationTest {
             assertThat(Files.readAllBytes(outFile)).isEqualTo(data);
         }
     }
+
+    @Test
+    void completedLeecher_servesFileToAnotherPeer(@TempDir Path tmpDir) throws Exception {
+        Path srcFile = tmpDir.resolve("source.bin");
+        Path leecherFile = tmpDir.resolve("leecher.bin");
+        Path thirdFile = tmpDir.resolve("third.bin");
+
+        byte[] data = new byte[256_000];
+        new Random(7).nextBytes(data);
+        Files.write(srcFile, data);
+
+        var manifest = new ManifestBuilder(64_000).build(srcFile);
+
+        try (var seederStorage = new SeederFileStorage(srcFile)) {
+            BitSet seederHeld = new BitSet(manifest.totalChunks());
+            seederHeld.set(0, manifest.totalChunks());
+
+            server = new TcpChunkServer(0, seederStorage, manifest, seederHeld);
+            serverThread = Thread.startVirtualThread(() -> {
+                try {
+                    server.start();
+                } catch (IOException ignored) {
+                }
+            });
+            waitForServerBound(server, 5_000);
+            PeerInfo seederPeer = new PeerInfo(
+                    UUID.randomUUID(), new InetSocketAddress("localhost", server.localPort()));
+
+            try (var leecherStorage = new FileChannelStorage(leecherFile);
+                 var connector = new TcpPeerConnector()) {
+                var leecher = new TransferManager(manifest, List.of(seederPeer), leecherStorage, connector);
+                try (var leecherServer = new TcpChunkServer(0, leecherStorage, manifest, leecher.liveHeldChunks())) {
+                    Thread leecherThread = Thread.startVirtualThread(() -> {
+                        try {
+                            leecherServer.start();
+                        } catch (IOException ignored) {
+                        }
+                    });
+                    waitForServerBound(leecherServer, 5_000);
+                    leecher.start();
+
+                    PeerInfo promoted = new PeerInfo(
+                            UUID.randomUUID(), new InetSocketAddress("localhost", leecherServer.localPort()));
+                    try (var thirdStorage = new FileChannelStorage(thirdFile);
+                         var thirdConnector = new TcpPeerConnector()) {
+                        var third = new TransferManager(manifest, List.of(promoted), thirdStorage, thirdConnector);
+                        third.start();
+                    }
+                    leecherServer.close();
+                    leecherThread.interrupt();
+                }
+            }
+
+            assertThat(Files.readAllBytes(leecherFile)).isEqualTo(data);
+            assertThat(Files.readAllBytes(thirdFile)).isEqualTo(data);
+        }
+    }
 }

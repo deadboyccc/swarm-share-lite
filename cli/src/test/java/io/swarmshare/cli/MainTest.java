@@ -88,4 +88,11 @@ class MainTest {
 
         assertThat(code).isNotZero();
     }
+
+    @Test
+    void downloadHelp_listsListenPort() {
+        var help = new java.io.StringWriter();
+        new CommandLine(new Main()).getSubcommands().get("download").usage(help);
+        assertThat(help.toString()).contains("--port");
+    }
 }
