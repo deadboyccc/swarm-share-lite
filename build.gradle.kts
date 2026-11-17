@@ -7,7 +7,7 @@ plugins {
 
 allprojects {
     group   = "io.swarmshare"
-    version = "0.4.0"
+    version = "1.0.0"
     repositories {
         mavenCentral()
     }

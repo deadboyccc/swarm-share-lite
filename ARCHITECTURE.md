@@ -1,27 +1,31 @@
-# swarm-share-lite — Complete Design, Implementation & Java Reference
+# swarm-share-lite — Design, Implementation & Java Reference
 
-> **Project Codename:** `swarm-share-lite`
-> **Language:** Java 25 (Virtual Threads, Records, Sealed Classes, Pattern Matching)
-> **Platform:** Linux (Ubuntu / Fedora)
-> **Philosophy:** Learn Distributed Systems by Building One. Simple Design. Extensible Boundaries.
+> **Language:** Java 25 (virtual threads, records, sealed types, pattern matching)
+> **Platform:** Linux · JVM or GraalVM native executable
+> **Philosophy:** Learn distributed systems by building one. Simple design, extensible boundaries.
+
+This document is the specification of swarm-share-lite and the reference for how
+it is built. Sections 1–17 describe the system as implemented; sections 18–21 are
+a study companion. Decisions taken where this document was silent or ambiguous
+are recorded in [`docs/ASSUMPTIONS.md`](docs/ASSUMPTIONS.md).
 
 ---
 
 ## Table of Contents
 
 1. [Vision & Goals](#1-vision--goals)
-2. [Core Concepts Explained](#2-core-concepts-explained)
+2. [Core Concepts](#2-core-concepts)
 3. [Architecture & Clean Boundaries](#3-architecture--clean-boundaries)
-4. [Domain Model — Full Code](#4-domain-model--full-code)
-5. [Port Interfaces — Extensibility Contracts](#5-port-interfaces--extensibility-contracts)
+4. [Domain Model](#4-domain-model)
+5. [Port Interfaces](#5-port-interfaces)
 6. [Chunk Lifecycle State Machine](#6-chunk-lifecycle-state-machine)
 7. [Storage Layer](#7-storage-layer)
 8. [Networking & Wire Protocol](#8-networking--wire-protocol)
 9. [Concurrency Model](#9-concurrency-model)
 10. [Transfer Orchestration](#10-transfer-orchestration)
 11. [Resilience & Retry](#11-resilience--retry)
-12. [Manifest Builder & Serialization](#12-manifest-builder--serialization)
-13. [CLI Entry Points](#13-cli-entry-points)
+12. [Manifest Builder, Serialization & Validation](#12-manifest-builder-serialization--validation)
+13. [Command-Line Interface](#13-command-line-interface)
 14. [Project Structure](#14-project-structure)
 15. [Build Configuration](#15-build-configuration)
 16. [Testing Strategy](#16-testing-strategy)
@@ -37,247 +41,238 @@
 
 ```mermaid
 graph TB
-    subgraph CLI["CLI Layer"]
-        Main["Main.java<br/>(seed, build-manifest, download)"]
-        FCS_CLI["FileChannelStorage"]
+    subgraph CLI["cli"]
+        Cmd["SwarmShareCli<br/>seed · leech · build-manifest · download · help"]
     end
-    
-    subgraph Transfer["Transfer/Orchestration Layer"]
-        TM["TransferManager<br/>(coordinator)"]
-        CST["ChunkStateTracker<br/>(atomic state)"]
+
+    subgraph Transfer["transfer"]
+        TM["TransferManager<br/>(orchestrator)"]
+        CST["ChunkStateTracker<br/>(CAS states)"]
         RP["RetryPolicy<br/>(exponential backoff)"]
+        PBL["PeerBanList<br/>(corrupt-peer bans)"]
     end
-    
-    subgraph Networking["Networking Layer"]
-        TCS["TcpChunkServer<br/>(listen + serve)"]
-        TPC["TcpPeerConnector<br/>(fetch chunks)"]
-        FE["FrameEncoder<br/>(serialize)"]
-        FD["FrameDecoder<br/>(deserialize)"]
+
+    subgraph Networking["networking"]
+        TCS["TcpChunkServer"]
+        TPC["TcpPeerConnector"]
+        FR["FrameEncoder / FrameDecoder"]
     end
-    
-    subgraph Storage["Storage Layer"]
-        FCS["FileChannelStorage<br/>(NIO I/O)"]
+
+    subgraph Storage["storage"]
+        FCS["FileChannelStorage"]
     end
-    
-    subgraph Manifest["Manifest Layer"]
-        MB["ManifestBuilder<br/>(chunk split)"]
-        MS["ManifestSerializer<br/>(JSON)"]
-        MV["ManifestValidator<br/>(verify)"]
+
+    subgraph ManifestM["manifest"]
+        MB["ManifestBuilder"]
+        MS["ManifestSerializer (JSON)"]
+        MV["ManifestValidator"]
     end
-    
-    subgraph Core["Core/Domain Layer"]
-        ChunkId["ChunkId<br/>(manifestHash+index)"]
-        Manifest["Manifest<br/>(file metadata)"]
-        ChunkState["ChunkState<br/>(MISSING→WRITTEN)"]
-        PeerInfo["PeerInfo<br/>(peer identity)"]
-        HasherPort["HasherPort<br/>(interface)"]
-        Sha256["Sha256<br/>(constant-time)"]
+
+    subgraph Core["core — no I/O, no frameworks"]
+        Domain["ChunkId · ChunkDescriptor · Manifest<br/>PeerInfo · ChunkState · TransferResult"]
+        Ports["StorageProvider · PeerConnector"]
+        Hash["HasherPort · Sha256"]
     end
-    
-    Main -->|orchestrates| TM
-    Main -->|reads/writes files| FCS_CLI
-    
-    TM -->|coordinates| TCS
-    TM -->|fetches via| TPC
-    TM -->|tracks state| CST
-    TM -->|applies| RP
-    TM -->|uses| FCS
-    TM -->|validates| Manifest
-    
-    TCS -->|encodes responses| FE
-    TPC -->|decodes chunks| FD
-    FE -->|uses| ManifestClass["Manifest (domain)"]
-    FD -->|uses| ManifestClass
-    
-    FCS -->|reads/writes| StorageInterface["StorageProvider<br/>(interface)"]
-    
-    MB -->|produces| MS
-    MS -->|validates with| MV
-    
-    TM -->|consumes| Manifest
-    TPC -->|consumes| Manifest
-    TCS -->|serves from| Manifest
-    
-    FCS -->|uses hashing port| HasherPort
-    MB -->|uses hashing port| HasherPort
-    HasherPort -.->|implemented by| Sha256
-    
-    TM -->|uses| PeerInfo
-    TPC -->|connects to| PeerInfo
-    
-    TM -->|transitions| ChunkState
-    CST -->|manages| ChunkState
-    
+
+    Cmd --> TM
+    Cmd --> TCS
+    Cmd --> MB
+    Cmd --> MS
+    TM --> CST
+    TM --> RP
+    TM --> PBL
+    TM --> MV
+    TM -->|uses port| Ports
+    TPC -.->|implements| Ports
+    FCS -.->|implements| Ports
+    TCS --> FR
+    TPC --> FR
+    MB --> Hash
+    FCS --> Hash
+    TM --> Hash
+
     style Core fill:#e1f5e1
-    style Manifest fill:#e3f2fd
+    style ManifestM fill:#e3f2fd
     style Storage fill:#fff3e0
     style Networking fill:#fce4ec
     style Transfer fill:#f3e5f5
     style CLI fill:#ede7f6
 ```
 
-**Dependency Flow:**
-- **CLI** → Commands invoke `TransferManager`
-- **Transfer** → Orchestrates all other layers, manages state and backpressure
-- **Networking** → Implements peer communication via TCP binary protocol
-- **Storage** → Provides random-access I/O for partial downloads and resume
-- **Manifest** → Splits files into chunks, validates integrity
-- **Core** → Domain model (zero I/O, zero dependencies) — all other layers depend inward only
+Dependencies point inward only. `core` depends on nothing; adapters
+(`storage`, `networking`) implement its ports; `transfer` orchestrates through
+the ports; `cli` wires concrete adapters together.
 
 ---
 
 ## 1. Vision & Goals
 
-### The Problem
+### The problem
 
-Copying large files across many machines is a serial bottleneck when only one or two sources exist. A 300 GB game on 2 machines in a 14-machine LAN: naive approach takes 13× the transfer time of a single copy.
+Copying a large file to many machines is a serial bottleneck when only one or two
+sources exist. A 300 GB game on 2 machines in a 14-machine LAN: the naive approach
+takes 13× the time of a single copy.
 
-### The Insight
+### The insight
 
-**Every receiver becomes a sender.** As soon as a node receives and verifies a chunk, it can serve that chunk to other nodes. Transfer time scales **logarithmically** with peer count rather than linearly.
+**Every receiver can become a sender.** A machine that holds a verified copy can
+serve it, so the number of sources grows as the file spreads, and total transfer
+time grows roughly with the logarithm of the number of machines instead of
+linearly.
 
 ```
-Round 1:  [A] ──50%──► [B]   [A] ──50%──► [C]       (2 sources → 2 new nodes)
-Round 2:  [A][B][C] each serve different peers        (3 sources → 3 new nodes in parallel)
+Round 1:  [A] ───► [B]   [A] ───► [C]          1 source  → 2 new copies
+Round 2:  [A] [B] [C] each serve another peer   3 sources → 3 new copies
 Round 3:  6 sources ...
 ```
 
+In v1 the unit of "becoming a sender" is a whole file: once `leech` finishes,
+that machine can `seed` the file. Serving individual chunks *while* still
+downloading (peer promotion) is described here as the direction of travel but is
+not part of the v1 roadmap (see [§17](#17-phased-roadmap)).
+
 ### Goals
 
-- Split large files into fixed-size chunks and assemble them seamlessly
-- Verify data integrity with SHA-256 per chunk and for the whole file
-- Coordinate concurrent downloads from multiple peers using Virtual Threads
-- Handle failures gracefully and support resume from partial downloads
-- Strict clean architecture: business logic never touches networking or disk directly
+- Split large files into fixed-size chunks and reassemble them exactly.
+- Verify integrity with SHA-256 per chunk **and** for the whole file.
+- Download from many peers concurrently on virtual threads.
+- Survive failures: retry, fail over, ban corrupt peers, resume partial downloads.
+- Strict clean architecture: business logic never touches the network or disk directly.
 
-### Non-Goals (v1)
+### Non-goals (v1)
 
-- No DHT / tracker-less peer discovery — static peer list only
-- No NAT traversal
-- No TLS / encryption (interface boundary exists for future addition)
-- No GUI — CLI only
+- No DHT or tracker — a static peer list given on the command line.
+- No NAT traversal.
+- No TLS or encryption (the `PeerConnector` port is the extension point).
+- No GUI — CLI only.
+- No persistent peer state (bans and failure counts last for one transfer).
 
 ---
 
-## 2. Core Concepts Explained
+## 2. Core Concepts
 
-### What is a Chunk?
+### Chunk
 
-A chunk is a fixed-size slice of the original file, stored as raw bytes. The last chunk may be smaller than the nominal size.
+A chunk is a fixed-size slice of the original file. Every chunk is exactly
+`chunkSize` bytes except the last, which may be shorter.
 
 ```
-File (10 MB, chunkSize = 1 MB):
-
- ┌────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┐
- │Chunk 0 │Chunk 1 │Chunk 2 │Chunk 3 │Chunk 4 │Chunk 5 │Chunk 6 │Chunk 7 │Chunk 8 │Chunk 9 │
- │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │ 1 MB   │
- └────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┘
-  offset=0  offset=  offset=  ...                                                  offset=9MB
-            1048576  2097152
+File (10 MiB, chunkSize = 1 MiB)
+┌───────┬───────┬───────┬───────┬───────┬───────┬───────┬───────┬───────┬───────┐
+│ chunk │ chunk │ chunk │ chunk │ chunk │ chunk │ chunk │ chunk │ chunk │ chunk │
+│   0   │   1   │   2   │   3   │   4   │   5   │   6   │   7   │   8   │   9   │
+└───────┴───────┴───────┴───────┴───────┴───────┴───────┴───────┴───────┴───────┘
+offset 0  1048576  2097152 ...                                       9437184
 ```
 
-Each chunk has:
-- An **index** (0-based position)
-- A **byte offset** in the original file
-- A **size** in bytes
-- A **SHA-256 checksum** of its raw bytes
+Each chunk has an **index** (0-based), a byte **offset**, a **size**, and the
+**SHA-256** of its bytes.
 
-### What is a Manifest?
+### Manifest
 
-The manifest is a JSON file that describes the entire transfer. It is the "contract" of the swarm — all peers must agree on the same manifest to participate.
+The manifest is the swarm's contract: every peer must agree on it before any
+chunk moves. It is a small JSON file written by the seeder.
 
 ```json
 {
-  "fileHash": "e3b0c44298fc1c149afbf4c8996fb924...",
-  "fileName":  "ubuntu-25.04.iso",
-  "totalSize": 1073741824,
-  "chunkSize": 1048576,
-  "chunks": [
-    { "index": 0, "offset": 0,       "size": 1048576, "sha256": "abc123..." },
-    { "index": 1, "offset": 1048576, "size": 1048576, "sha256": "def456..." },
-    ...
+  "fileHash" : "1ce251bb506e10558235cf3feade0c868b215d47bd9c18523c58737db433f5fd",
+  "fileName" : "ubuntu.iso",
+  "totalSize" : 10485760,
+  "chunkSize" : 1048576,
+  "chunks" : [ {
+    "index" : 0,
+    "offset" : 0,
+    "size" : 1048576,
+    "sha256" : "c20cd2e6df572f5ececbb5c3687e330c3fc7f66c76c039978156be2f0461ba11"
+  }, ...
   ]
 }
 ```
 
-### What is a Peer?
+`fileHash` is the SHA-256 of the whole file. It doubles as the swarm identifier
+on the wire: a peer only answers requests for the manifest it serves.
 
-A peer is any node in the swarm. Every peer:
-- Has a stable `UUID` identity
-- Listens on a TCP port to **serve** chunks it holds
-- Connects to other peers as a TCP client to **download** missing chunks
-- Maintains a `BitSet` of which chunk indices it currently holds
+### Peer
 
-### What is a BitSet?
+A peer is any node in the swarm. It has a `UUID` and an address. A **seeder**
+listens on a TCP port and serves chunks; a **leecher** connects to peers to
+download the chunks it is missing.
 
-`java.util.BitSet` is a compact data structure where each bit represents a boolean — in our case, whether a peer holds a specific chunk index.
+### Piece map (BitSet)
+
+`java.util.BitSet` records which chunk indices a peer holds — bit `i` set means
+"I have chunk `i`". Peers exchange piece maps so a leecher can plan which peer to
+ask for each chunk.
 
 ```
-Peer holds chunks 0, 2, 3, 7:
-BitSet: 1 0 1 1 0 0 0 1 0 0 ...
-index:  0 1 2 3 4 5 6 7 8 9 ...
+Peer holds chunks 0, 2, 3, 7
+BitSet:  1 0 1 1 0 0 0 1 0 0
+index:   0 1 2 3 4 5 6 7 8 9
 ```
-
-When peers exchange BitSets over the wire, a leecher can determine exactly which peers have which chunks and plan downloads without redundant requests.
 
 ---
 
 ## 3. Architecture & Clean Boundaries
 
-### The Dependency Rule
+### The dependency rule
+
+The domain defines **ports** (interfaces); infrastructure provides **adapters**
+(implementations). The domain never imports infrastructure. This is the Ports &
+Adapters (hexagonal) architecture.
 
 ```
-Core Domain (pure Java, no I/O)
-    ↑ implements
-Infrastructure (TCP, FileChannel, etc.)
+┌───────────────────────────────────────────────────────────────┐
+│                       TransferManager                         │
+│                    (orchestration, transfer)                  │
+└─────────────┬──────────────────────────────┬──────────────────┘
+              │                              │
+      ┌───────▼────────┐             ┌───────▼─────────┐
+      │ PeerConnector  │             │ StorageProvider │   ports (core)
+      │  <<interface>> │             │  <<interface>>  │
+      └───────┬────────┘             └───────┬─────────┘
+              │ implements                   │ implements
+      ┌───────▼─────────┐            ┌───────▼───────────┐
+      │ TcpPeerConnector│            │ FileChannelStorage│   adapters
+      │  (networking)   │            │     (storage)     │
+      └─────────────────┘            └───────────────────┘
 ```
 
-The domain defines **interfaces** (ports). Infrastructure provides **implementations** (adapters). The domain never imports infrastructure classes. This is the **Ports & Adapters** pattern (Hexagonal Architecture).
+### Module graph (enforced by Gradle)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          TransferManager                                │
-│                       (System Orchestrator)                             │
-└──────────────┬──────────────────────────┬───────────────────────────────┘
-               │                          │
-       ┌───────▼────────┐        ┌────────▼────────┐
-       │  PeerConnector  │        │ StorageProvider  │
-       │  <<interface>>  │        │  <<interface>>   │
-       └───────┬─────────┘        └────────┬─────────┘
-               │ implements                │ implements
-       ┌───────▼─────────┐        ┌────────▼─────────┐
-       │  TcpPeerConnector│        │FileChannelStorage│
-       │  (networking/)  │        │   (storage/)     │
-       └─────────────────┘        └──────────────────┘
-
-Core Domain (core/)
-├── domain/     ← ChunkId, Manifest, PeerInfo, TransferResult (pure Records)
-└── port/       ← StorageProvider, PeerConnector (interfaces only)
+cli ──► transfer ──► manifest ──► core
+ │          └──────────────────► core
+ ├─► networking ──► core
+ ├─► storage ──────► core
+ └─► manifest
 ```
 
-### Why This Matters
+| Module | Responsibility | Depends on |
+|--------|----------------|------------|
+| `core` | Domain records, ports, `HasherPort`/`Sha256` | — |
+| `manifest` | Build, (de)serialize and validate manifests | `core`, Jackson |
+| `storage` | `FileChannelStorage`: positional file I/O, resume scan | `core` |
+| `networking` | Binary framing, `TcpChunkServer`, `TcpPeerConnector` | `core` |
+| `transfer` | `TransferManager`, state tracking, retry, bans | `core`, `manifest` (validator) |
+| `cli` | picocli commands; wires adapters together | everything |
 
-- You can test `TransferManager` with a fake in-memory `StorageProvider` and `PeerConnector` — no disk, no network needed in tests
-- You can swap `TcpPeerConnector` for `TlsPeerConnector` later without touching orchestration code
-- Each layer compiles independently — circular dependencies are architecturally impossible
+### Why this matters
+
+- `TransferManager` is tested with in-memory fakes — no disk, no network.
+- `TcpPeerConnector` could be swapped for a TLS connector, or `FileChannelStorage`
+  for object storage, without touching orchestration.
+- Each module compiles on its own; circular dependencies cannot be expressed.
 
 ---
 
-## 4. Domain Model — Full Code
+## 4. Domain Model
 
-All domain types are Java **Records** — immutable, auto-`equals`/`hashCode`/`toString`, no boilerplate.
+All domain types live in `core` and are immutable records with validating
+compact constructors.
 
 ```java
-// core/domain/ChunkId.java
-package io.swarmshare.core.domain;
-
-/**
- * Globally unique identity for a chunk.
- * The manifestHash ties it to a specific file transfer.
- * Two chunks with the same index but different manifests are completely different objects.
- */
+/** Globally unique identity of a chunk: the same index in two manifests is two chunks. */
 public record ChunkId(String manifestHash, int index) {
-    // Compact constructor for validation
     public ChunkId {
         if (manifestHash == null || manifestHash.isBlank())
             throw new IllegalArgumentException("manifestHash must not be blank");
@@ -285,1292 +280,442 @@ public record ChunkId(String manifestHash, int index) {
             throw new IllegalArgumentException("index must be >= 0");
     }
 }
-```
 
-```java
-// core/domain/ChunkDescriptor.java
-package io.swarmshare.core.domain;
-
-/**
- * Describes one chunk within a manifest.
- * Immutable — created once by the seeder, consumed by all peers.
- */
-public record ChunkDescriptor(
-    ChunkId id,
-    long offset,   // byte offset in original file
-    int size,      // byte count (may be < chunkSize for the last chunk)
-    String sha256  // expected SHA-256 hex checksum of this chunk's raw bytes
-) {
+/** One chunk of a manifest. Created once by the seeder, read by every peer. */
+public record ChunkDescriptor(ChunkId id, long offset, int size, String sha256) {
     public ChunkDescriptor {
         if (offset < 0) throw new IllegalArgumentException("offset must be >= 0");
         if (size <= 0)  throw new IllegalArgumentException("size must be > 0");
     }
 }
-```
 
-```java
-// core/domain/Manifest.java
-package io.swarmshare.core.domain;
-
-import java.util.List;
-
-/**
- * The contract of a swarm. Immutable once created by the seeder.
- * Distributed to all peers before any chunk transfer begins.
- * fileHash is SHA-256 of the entire assembled file — final integrity check.
- */
-public record Manifest(
-    String fileHash,
-    String fileName,
-    long totalSize,
-    int chunkSize,
-    List<ChunkDescriptor> chunks
-) {
+/** The swarm's contract. fileHash is the SHA-256 of the whole file. */
+public record Manifest(String fileHash, String fileName, long totalSize,
+                       int chunkSize, List<ChunkDescriptor> chunks) {
     public Manifest {
-        chunks = List.copyOf(chunks); // defensive copy, ensures immutability
+        chunks = List.copyOf(chunks); // defensive, unmodifiable copy
     }
-
     public int totalChunks() { return chunks.size(); }
-
-    /** Convenience: look up a descriptor by chunk index. O(1) by list index. */
     public ChunkDescriptor chunkAt(int index) { return chunks.get(index); }
 }
-```
 
-```java
-// core/domain/PeerInfo.java
-package io.swarmshare.core.domain;
-
-import java.net.InetSocketAddress;
-import java.util.UUID;
-
-/**
- * Identity and address of a swarm participant.
- * UUID is stable across reconnects (read from config or generated once on first run).
- */
+/** Identity and address of a swarm participant. */
 public record PeerInfo(UUID id, InetSocketAddress address) {
-    public String displayAddress() {
-        return address.getHostString() + ":" + address.getPort();
-    }
+    public String displayAddress() { return address.getHostString() + ":" + address.getPort(); }
 }
-```
 
-```java
-// core/domain/ChunkState.java
-package io.swarmshare.core.domain;
+/** Lifecycle of one chunk during a transfer (see §6). */
+public enum ChunkState { MISSING, SCHEDULED, IN_FLIGHT, VERIFYING, VERIFIED, WRITTEN }
 
-/**
- * The lifecycle state of a single chunk during transfer.
- * States transition monotonically (no going backwards except MISSING on failure).
- */
-public enum ChunkState {
-    MISSING,     // Not yet downloaded; needs to be fetched
-    SCHEDULED,   // Assigned to a virtual thread for download
-    IN_FLIGHT,   // Active network I/O in progress
-    VERIFYING,   // SHA-256 being computed
-    VERIFIED,    // Hash matched; safe to write
-    WRITTEN      // Persisted to disk; bit set in BitSet
-}
-```
-
-```java
-// core/domain/TransferResult.java
-package io.swarmshare.core.domain;
-
-/**
- * Sealed result type for a single chunk download attempt.
- * The compiler forces exhaustive handling via pattern matching.
- * shouldRetry=true signals the orchestrator to re-queue the chunk.
- */
-public sealed interface TransferResult
-    permits TransferResult.Success, TransferResult.Failure {
-
+/** Outcome of one download attempt; sealed, so callers must handle both cases. */
+public sealed interface TransferResult permits TransferResult.Success, TransferResult.Failure {
     record Success(ChunkId id, byte[] data) implements TransferResult {}
-
-    record Failure(ChunkId id, String reason, boolean shouldRetry)
-        implements TransferResult {}
+    record Failure(ChunkId id, String reason, boolean shouldRetry) implements TransferResult {}
 }
 ```
+
+Hashing is a port too, so the domain stays free of `MessageDigest` details:
+
+```java
+public interface HasherPort {
+    String compute(byte[] data);                    // lowercase hex
+    boolean verify(byte[] data, String expectedHex); // constant-time comparison
+}
+```
+
+`Sha256` implements it. It allocates a fresh `MessageDigest` per call — cheap
+next to the hashing itself, and free of shared state — and compares digests with
+`MessageDigest.isEqual` so a mismatch leaks no timing information. It also hashes
+an `Iterator<byte[]>` so the whole-file hash can be streamed chunk by chunk.
 
 ---
 
-## 5. Port Interfaces — Extensibility Contracts
+## 5. Port Interfaces
 
-These two interfaces are the only surface area between the domain and the outside world. Everything pluggable goes here.
+The only surface between the domain and the outside world.
 
 ```java
-// core/port/StorageProvider.java
-package io.swarmshare.core.port;
-
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.Manifest;
-
-import java.util.BitSet;
-import java.util.Optional;
-
-/**
- * Abstracts all persistent storage operations.
- *
- * Implementations:
- *   - FileChannelStorage  (production: direct file I/O)
- *   - InMemoryStorage     (testing: byte arrays, no disk)
- *
- * The domain never calls FileChannel, Path, or Files directly.
- */
 public interface StorageProvider {
-
-    /**
-     * Pre-allocate the output file to totalSize bytes on disk.
-     * This avoids fragmentation and allows out-of-order writes.
-     * Called once before any chunks are written.
-     */
+    /** Size the output file before any chunk is written; keeps an existing same-size file for resume. */
     void preallocateSpace(long totalSize);
 
-    /**
-     * Write raw chunk bytes to the correct byte offset in the output file.
-     * Must be safe to call concurrently from multiple virtual threads
-     * as long as different chunks are being written simultaneously.
-     */
+    /** Write chunk bytes at their offset. Safe concurrently for disjoint ranges. */
     void writeChunk(ChunkId id, long offset, byte[] data);
 
-    /**
-     * Read raw chunk bytes from disk for serving to a remote peer.
-     * Returns empty if the chunk has not been written yet.
-     */
+    /** Read chunk bytes to serve or verify; empty if they are not there. */
     Optional<byte[]> readChunk(ChunkId id, long offset, int size);
 
-    /**
-     * Scan the output file on startup to determine which chunks
-     * are already complete (for resume support).
-     * Returns a BitSet where bit[i] = true means chunk i is verified on disk.
-     */
+    /** Resume support: bit i is set iff chunk i is on disk and matches its hash. */
     BitSet checkExistingChunks(Manifest manifest);
+
+    /** Durably persist completed writes (no-op for in-memory storage). */
+    default void flush() {}
 }
-```
 
-```java
-// core/port/PeerConnector.java
-package io.swarmshare.core.port;
-
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.PeerInfo;
-
-import java.util.BitSet;
-import java.util.concurrent.CompletableFuture;
-
-/**
- * Abstracts all outgoing peer communication.
- *
- * Implementations:
- *   - TcpPeerConnector    (production: raw TCP binary framing)
- *   - FakePeerConnector   (testing: in-memory byte arrays)
- *
- * All methods return CompletableFuture to allow the orchestrator
- * to submit many concurrent requests without blocking the caller.
- * Each future runs on a virtual thread inside the implementation.
- */
 public interface PeerConnector {
-
-    /**
-     * Request a specific chunk from a remote peer.
-     * Returns the raw chunk bytes on success.
-     * Exceptionally completes on timeout, connection refused, or NOT_FOUND.
-     */
+    /** Fetch one chunk; completes exceptionally on timeout, refusal, error status or bad length. */
     CompletableFuture<byte[]> fetchChunkAsync(PeerInfo peer, ChunkId id, int size);
 
-    /**
-     * Request the remote peer's BitSet of held chunks for a given manifest.
-     * Used to plan which peer to request each chunk from.
-     */
+    /** Fetch the peer's piece map for a manifest. */
     CompletableFuture<BitSet> fetchPieceMapAsync(PeerInfo peer, String manifestHash);
 }
 ```
+
+| Port | Production adapter | Test doubles |
+|------|-------------------|--------------|
+| `StorageProvider` | `FileChannelStorage` | `InMemoryStorage`, `SeederFileStorage` |
+| `PeerConnector` | `TcpPeerConnector` | `FakePeerConnector` (scriptable misbehaviour) |
+| `HasherPort` | `Sha256` | — |
 
 ---
 
 ## 6. Chunk Lifecycle State Machine
 
 ```
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │                      Chunk Lifecycle                                │
-  │                                                                     │
-  │   MISSING ──────────────────────────────────────────────────────┐  │
-  │      │                                                           │  │
-  │      │ orchestrator picks chunk                                  │  │
-  │      ▼                                                           │  │
-  │   SCHEDULED                                                      │  │
-  │      │                                                           │  │
-  │      │ virtual thread starts network I/O                        │  │
-  │      ▼                                                           │  │
-  │   IN_FLIGHT                                                      │  │
-  │      │                                                           │  │
-  │      │ bytes received from socket                               │  │
-  │      ▼                                                           │  │
-  │   VERIFYING ─── hash mismatch / timeout ──────────────────────► │  │
-  │      │                   (increment failure count)              │  │
-  │      │ sha256 matches                                            │  │
-  │      ▼                                                           │  │
-  │   VERIFIED                                                       │  │
-  │      │                                                           │  │
-  │      │ FileChannel.write(buf, offset)                           │  │
-  │      ▼                                                           │  │
-  │   WRITTEN ── BitSet.set(index) ── notify orchestrator           │  │
-  └─────────────────────────────────────────────────────────────────────┘
+              orchestrator schedules the chunk
+   MISSING ─────────────────────────────────► SCHEDULED
+      ▲                                           │ virtual thread starts I/O
+      │                                           ▼
+      │                                       IN_FLIGHT
+      │   network error, checksum mismatch,       │ bytes received
+      │   or write error → retry or give up       ▼
+      ├─────────────────────────────────────  VERIFYING
+      │                                           │ SHA-256 matches
+      │                                           ▼
+      │                                       VERIFIED
+      │                                           │ FileChannel write at offset
+      │                                           ▼
+      └ (resume: valid on disk) ────────────►  WRITTEN ── bit set in heldChunks
 ```
 
-### State Tracking Implementation
+`ChunkStateTracker` keeps the state per `ChunkId` in a `ConcurrentHashMap` and
+moves it with an atomic compare-and-swap:
 
 ```java
-// transfer/ChunkStateTracker.java
-package io.swarmshare.transfer;
-
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.ChunkState;
-
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-
-public class ChunkStateTracker {
-
-    // ConcurrentHashMap: thread-safe map for concurrent virtual thread reads/writes
-    // No synchronized blocks needed for independent chunk state updates
-    private final ConcurrentHashMap<ChunkId, ChunkState> states = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<ChunkId, AtomicInteger> failureCounts = new ConcurrentHashMap<>();
-
-    public void initialize(ChunkId id) {
-        states.put(id, ChunkState.MISSING);
-        failureCounts.put(id, new AtomicInteger(0));
-    }
-
-    /**
-     * Atomic compare-and-swap: only transition if current state matches expected.
-     * Prevents two virtual threads from both scheduling the same chunk.
-     */
-    public boolean transition(ChunkId id, ChunkState expected, ChunkState next) {
-        return states.replace(id, expected, next); // atomic CAS
-    }
-
-    public ChunkState getState(ChunkId id) {
-        return states.getOrDefault(id, ChunkState.MISSING);
-    }
-
-    public int incrementFailure(ChunkId id) {
-        return failureCounts.computeIfAbsent(id, k -> new AtomicInteger(0))
-                            .incrementAndGet();
-    }
-
-    public int getFailureCount(ChunkId id) {
-        return failureCounts.getOrDefault(id, new AtomicInteger(0)).get();
-    }
+public boolean transition(ChunkId id, ChunkState expected, ChunkState next) {
+    return states.replace(id, expected, next); // succeeds only from `expected`
 }
 ```
+
+A failed attempt can die in `IN_FLIGHT`, `VERIFYING` or `VERIFIED` (a write
+error after verification), so the retry path uses `reset(id, SCHEDULED)` rather
+than a CAS. Failure counts are `AtomicInteger`s.
 
 ---
 
 ## 7. Storage Layer
 
-### FileChannelStorage — Production Implementation
+`FileChannelStorage` writes and reads chunks at explicit offsets in a single
+pre-allocated file.
 
-```java
-// storage/FileChannelStorage.java
-package io.swarmshare.storage;
+**Why `FileChannel`?** `write(buffer, position)` and `read(buffer, position)` do
+not move a shared file pointer, so virtual threads can write disjoint chunks of
+the same file concurrently with no lock. `FileOutputStream` has one cursor and
+would serialize every write.
 
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.ChunkDescriptor;
-import io.swarmshare.core.domain.Manifest;
-import io.swarmshare.core.port.StorageProvider;
+| Operation | Behaviour |
+|-----------|-----------|
+| `preallocateSpace(n)` | Creates parent directories and the file. A file already exactly `n` bytes is left untouched (it may be a partial download). A shorter file is extended, a longer one truncated. |
+| `writeChunk` | Loops until every byte is written, then `force(true)` so a completed chunk survives a crash. Requires `preallocateSpace` first. |
+| `readChunk` | Positional read; `Optional.empty()` if the file is shorter than the range. Without `preallocateSpace` the file is opened **read-only** — the seeder path, which must never write to the file it serves. |
+| `checkExistingChunks` | Reads and hashes every chunk range; only matching chunks are reported. |
+| `close` | Terminal: later reads/writes throw `IllegalStateException` instead of silently reopening the file. |
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.util.BitSet;
-import java.util.Optional;
+Swapping, lazily opening and closing the channel is guarded by a
+`ReentrantLock` — opening a file is blocking I/O, which must not happen under
+`synchronized` (§20.5). Positional reads and writes take no lock.
 
-/**
- * Writes chunks directly to their byte offset in a pre-allocated output file.
- * Uses FileChannel for position-aware reads and writes — no sequential constraint.
- *
- * Why FileChannel over FileOutputStream?
- *  - FileChannel.write(buffer, position) writes at an explicit offset without seeking
- *  - Multiple virtual threads can write to different offsets simultaneously
- *  - FileOutputStream is sequential; concurrent seeks would require external locking
- */
-public class FileChannelStorage implements StorageProvider {
+### Resume needs no metadata
 
-    private final Path outputPath;
-    private final ChecksumVerifier verifier;
-
-    // FileChannel is thread-safe for positional reads/writes at different offsets
-    private FileChannel channel;
-
-    public FileChannelStorage(Path outputPath) {
-        this.outputPath = outputPath;
-        this.verifier = new ChecksumVerifier();
-    }
-
-    @Override
-    public void preallocateSpace(long totalSize) {
-        try {
-            // Open or create the file, then truncate/extend to exact size
-            channel = FileChannel.open(outputPath,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.READ,
-                StandardOpenOption.WRITE);
-            channel.truncate(totalSize); // pre-allocates exactly totalSize bytes
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to preallocate output file", e);
-        }
-    }
-
-    @Override
-    public void writeChunk(ChunkId id, long offset, byte[] data) {
-        try {
-            // ByteBuffer.wrap avoids copying: wraps the existing array
-            // channel.write(buf, position) is atomic for concurrent calls at different positions
-            ByteBuffer buffer = ByteBuffer.wrap(data);
-            while (buffer.hasRemaining()) {
-                // Loop handles partial writes (rare but contractually required by FileChannel)
-                channel.write(buffer, offset + buffer.position());
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to write chunk " + id.index(), e);
-        }
-    }
-
-    @Override
-    public Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
-        try {
-            ByteBuffer buffer = ByteBuffer.allocate(size);
-            int bytesRead = 0;
-            while (bytesRead < size) {
-                int n = channel.read(buffer, offset + bytesRead);
-                if (n == -1) return Optional.empty(); // file shorter than expected
-                bytesRead += n;
-            }
-            return Optional.of(buffer.array());
-        } catch (IOException e) {
-            return Optional.empty();
-        }
-    }
-
-    @Override
-    public BitSet checkExistingChunks(Manifest manifest) {
-        BitSet existing = new BitSet(manifest.totalChunks());
-        for (ChunkDescriptor desc : manifest.chunks()) {
-            readChunk(desc.id(), desc.offset(), desc.size())
-                .filter(data -> verifier.verify(data, desc.sha256()))
-                .ifPresent(_ -> existing.set(desc.id().index()));
-        }
-        return existing;
-    }
-
-    public void close() {
-        try { if (channel != null) channel.close(); }
-        catch (IOException e) { /* log and swallow on close */ }
-    }
-}
-```
-
-### ChecksumVerifier
-
-```java
-// storage/ChecksumVerifier.java
-package io.swarmshare.storage;
-
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
-
-/**
- * SHA-256 verification.
- *
- * MessageDigest is NOT thread-safe — never share an instance across threads.
- * Options:
- *   1. Create per call (simple, slight GC pressure — fine for chunk-sized work)
- *   2. ThreadLocal<MessageDigest> (reuse, zero contention)
- *
- * We use option 2 for production path:
- */
-public class ChecksumVerifier {
-
-    // ThreadLocal: each virtual thread gets its own MessageDigest instance
-    private static final ThreadLocal<MessageDigest> DIGEST =
-        ThreadLocal.withInitial(() -> {
-            try { return MessageDigest.getInstance("SHA-256"); }
-            catch (NoSuchAlgorithmException e) { throw new RuntimeException(e); }
-        });
-
-    public String compute(byte[] data) {
-        MessageDigest md = DIGEST.get();
-        md.reset(); // must reset before reuse
-        return HexFormat.of().formatHex(md.digest(data));
-    }
-
-    public boolean verify(byte[] data, String expectedHex) {
-        return compute(data).equals(expectedHex);
-    }
-}
-```
+On restart, `checkExistingChunks` re-hashes every chunk range of the output file.
+Chunks that match are kept; torn or never-written chunks fail their hash and are
+downloaded again. The file itself is the recovery log.
 
 ---
 
 ## 8. Networking & Wire Protocol
 
-### Binary Frame Format
+Plain TCP, big-endian integers (`DataInputStream`/`DataOutputStream` defaults).
+Each connection carries **one request and one response**, then closes — stateless
+and simple; connection pooling is a possible later optimisation.
 
-All communication is over plain TCP. We define a minimal binary framing protocol.
+### Message types
 
-#### Message Type Codes
+| Code | Message | Direction |
+|------|---------|-----------|
+| `0x01` | `PIECE_MAP_REQUEST` | leecher → peer |
+| `0x03` | `CHUNK_REQUEST` | leecher → peer |
 
-```
-0x01  PIECE_MAP_REQUEST   → "Tell me which chunks you hold for manifest X"
-0x02  PIECE_MAP_RESPONSE  → BitSet serialized as byte array
-0x03  CHUNK_REQUEST       → "Send me chunk N of manifest X"
-0x04  CHUNK_RESPONSE      → raw chunk bytes (or error status)
-```
+Requests start with their type byte. Responses do **not**: on a one-request
+connection the pairing is implicit, so a response starts with its status.
 
-#### CHUNK_REQUEST Frame Layout
-
-```
-┌──────────────┬──────────────────────┬─────────────────────┬─────────────────┐
-│ MsgType      │ Hash String Length   │  Manifest Hash Str  │  Chunk Index    │
-│  [1 byte]    │     [4 bytes BE]     │    [N bytes UTF-8]  │  [4 bytes BE]   │
-└──────────────┴──────────────────────┴─────────────────────┴─────────────────┘
-```
-
-#### CHUNK_RESPONSE Frame Layout
+### Frames
 
 ```
-┌──────────────┬──────────────────────┬──────────────────────────────────────┐
-│ Status       │  Payload Length      │  Raw Chunk Bytes                     │
-│  [1 byte]    │    [4 bytes BE]      │  [N bytes]                           │
-└──────────────┴──────────────────────┴──────────────────────────────────────┘
+PIECE_MAP_REQUEST
+┌──────────┬──────────────────┬──────────────────┐
+│ 0x01     │ hash length      │ manifest hash    │
+│ 1 byte   │ 4 bytes BE       │ N bytes UTF-8    │
+└──────────┴──────────────────┴──────────────────┘
 
-Status: 0x00 = OK  |  0x01 = NOT_FOUND  |  0x02 = ERROR
+CHUNK_REQUEST
+┌──────────┬──────────────────┬──────────────────┬──────────────┐
+│ 0x03     │ hash length      │ manifest hash    │ chunk index  │
+│ 1 byte   │ 4 bytes BE       │ N bytes UTF-8    │ 4 bytes BE   │
+└──────────┴──────────────────┴──────────────────┴──────────────┘
+
+RESPONSE (both kinds)
+┌──────────┬──────────────────┬──────────────────────────────────────────┐
+│ status   │ payload length   │ payload: chunk bytes or BitSet bytes     │
+│ 1 byte   │ 4 bytes BE       │ N bytes (0 unless status is OK)          │
+└──────────┴──────────────────┴──────────────────────────────────────────┘
 ```
 
-#### PIECE_MAP_REQUEST Frame Layout
+### Status codes
 
-```
-┌──────────────┬──────────────────────┬──────────────────────┐
-│ MsgType      │  Hash String Length  │  Manifest Hash Str   │
-│  [1 byte]    │    [4 bytes BE]      │  [N bytes UTF-8]     │
-└──────────────┴──────────────────────┴──────────────────────┘
-```
+| Status | Meaning | Sent when |
+|--------|---------|-----------|
+| `0x00` OK | Payload follows | Chunk bytes, or `BitSet.toByteArray()` of held chunks |
+| `0x01` NOT_FOUND | The peer cannot serve this | Unknown manifest hash, index out of range, chunk not held, bytes not on disk |
+| `0x02` ERROR | The request failed | Unknown message type; internal failure while serving (e.g. storage error) |
 
-#### PIECE_MAP_RESPONSE Frame Layout
+### Limits and timeouts
 
-```
-┌──────────────┬──────────────────────┬──────────────────────┐
-│ Status       │  BitSet Bytes Length │  BitSet.toByteArray()│
-│  [1 byte]    │    [4 bytes BE]      │  [N bytes]           │
-└──────────────┴──────────────────────┴──────────────────────┘
-```
+| Guard | Value | Why |
+|-------|-------|-----|
+| Manifest hash length | ≤ 256 bytes | Rejects hostile lengths before allocating (SHA-256 hex is 64) |
+| Piece-map payload | ≤ 1 MiB | Describes 8 million chunks; anything larger is hostile |
+| Chunk payload | must equal the manifest's chunk size | A stale or lying peer is rejected before reading the bytes |
+| Client connect + read timeout | 10 s | A dead peer cannot stall a download thread forever |
+| Server read timeout per connection | 10 s | An idle or half-open client cannot pin a handler and a file descriptor |
 
-### Why Big-Endian (BE)?
+### Partial reads
 
-Java's `DataInputStream` and `DataOutputStream` use big-endian by default (`readInt()`, `writeInt()`). Stick to the Java default — no byte order surprises.
+A TCP `read` may return fewer bytes than asked. `FrameDecoder.readExactly` loops
+until the buffer is full and fails on end-of-stream — or on a zero-byte read,
+which would otherwise spin forever.
 
-### Frame Encoder & Decoder
+### Server and client
 
-```java
-// networking/FrameEncoder.java
-package io.swarmshare.networking;
-
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-
-public class FrameEncoder {
-
-    public static void writeChunkRequest(DataOutputStream out,
-                                          String manifestHash, int chunkIndex)
-            throws IOException {
-        byte[] hashBytes = manifestHash.getBytes(StandardCharsets.UTF_8);
-        out.writeByte(0x03);
-        out.writeInt(hashBytes.length);
-        out.write(hashBytes);
-        out.writeInt(chunkIndex);
-        out.flush();
-    }
-
-    public static void writeChunkResponse(DataOutputStream out,
-                                           byte status, byte[] payload)
-            throws IOException {
-        out.writeByte(0x04);
-        out.writeByte(status);
-        out.writeInt(payload.length);
-        out.write(payload);
-        out.flush();
-    }
-
-    public static void writePieceMapRequest(DataOutputStream out, String manifestHash)
-            throws IOException {
-        byte[] hashBytes = manifestHash.getBytes(StandardCharsets.UTF_8);
-        out.writeByte(0x01);
-        out.writeInt(hashBytes.length);
-        out.write(hashBytes);
-        out.flush();
-    }
-
-    public static void writePieceMapResponse(DataOutputStream out, byte[] bitSetBytes)
-            throws IOException {
-        out.writeByte(0x02);
-        out.writeByte(0x00); // status OK
-        out.writeInt(bitSetBytes.length);
-        out.write(bitSetBytes);
-        out.flush();
-    }
-}
-```
-
-```java
-// networking/FrameDecoder.java
-package io.swarmshare.networking;
-
-import java.io.DataInputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-
-public class FrameDecoder {
-
-    /** Read exactly N bytes from the stream — handles partial socket reads. */
-    public static byte[] readExactly(DataInputStream in, int n) throws IOException {
-        byte[] buf = new byte[n];
-        int offset = 0;
-        while (offset < n) {
-            int read = in.read(buf, offset, n - offset);
-            if (read == -1) throw new IOException("Stream ended before " + n + " bytes read");
-            offset += read;
-        }
-        return buf;
-    }
-
-    public static ParsedChunkRequest readChunkRequest(DataInputStream in) throws IOException {
-        int hashLen       = in.readInt();
-        String manifestHash = new String(readExactly(in, hashLen), StandardCharsets.UTF_8);
-        int chunkIndex    = in.readInt();
-        return new ParsedChunkRequest(manifestHash, chunkIndex);
-    }
-
-    public record ParsedChunkRequest(String manifestHash, int chunkIndex) {}
-}
-```
-
-### TCP Server — Serving Chunks
-
-```java
-// networking/TcpChunkServer.java
-package io.swarmshare.networking;
-
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.Manifest;
-import io.swarmshare.core.port.StorageProvider;
-
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.util.BitSet;
-import java.util.concurrent.Executors;
-
-/**
- * Listens on a TCP port and serves chunk requests from remote peers.
- * Each incoming connection is handled by a virtual thread — no thread pool sizing needed.
- */
-public class TcpChunkServer {
-
-    private final int port;
-    private final StorageProvider storage;
-    private final Manifest manifest;
-    private final BitSet heldChunks; // guarded by caller — read-only from server's perspective
-
-    public TcpChunkServer(int port, StorageProvider storage,
-                           Manifest manifest, BitSet heldChunks) {
-        this.port        = port;
-        this.storage     = storage;
-        this.manifest    = manifest;
-        this.heldChunks  = heldChunks;
-    }
-
-    public void start() throws IOException {
-        var executor = Executors.newVirtualThreadPerTaskExecutor();
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Listening on port " + port);
-            while (!Thread.currentThread().isInterrupted()) {
-                Socket client = serverSocket.accept(); // blocking — fine on virtual thread
-                executor.submit(() -> handleClient(client));
-            }
-        }
-    }
-
-    private void handleClient(Socket client) {
-        try (client;
-             var in  = new DataInputStream(client.getInputStream());
-             var out = new DataOutputStream(client.getOutputStream())) {
-
-            byte msgType = in.readByte();
-
-            switch (msgType) {
-                case 0x01 -> handlePieceMapRequest(in, out);
-                case 0x03 -> handleChunkRequest(in, out);
-                default   -> FrameEncoder.writeChunkResponse(out, (byte) 0x02, new byte[0]);
-            }
-        } catch (IOException e) {
-            // Client disconnected — log and move on
-        }
-    }
-
-    private void handleChunkRequest(DataInputStream in, DataOutputStream out) throws IOException {
-        var req   = FrameDecoder.readChunkRequest(in);
-        var desc  = manifest.chunkAt(req.chunkIndex());
-        var bytes = storage.readChunk(
-            new ChunkId(req.manifestHash(), req.chunkIndex()),
-            desc.offset(), desc.size());
-
-        if (bytes.isPresent()) {
-            FrameEncoder.writeChunkResponse(out, (byte) 0x00, bytes.get());
-        } else {
-            FrameEncoder.writeChunkResponse(out, (byte) 0x01, new byte[0]);
-        }
-    }
-
-    private void handlePieceMapRequest(DataInputStream in, DataOutputStream out) throws IOException {
-        int hashLen     = in.readInt();
-        byte[] hashBytes = FrameDecoder.readExactly(in, hashLen);
-        // heldChunks.toByteArray() is a compact representation of the BitSet
-        FrameEncoder.writePieceMapResponse(out, heldChunks.toByteArray());
-    }
-}
-```
-
-### TCP Client — Fetching Chunks
-
-```java
-// networking/TcpPeerConnector.java
-package io.swarmshare.networking;
-
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.PeerInfo;
-import io.swarmshare.core.port.PeerConnector;
-
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.net.Socket;
-import java.util.BitSet;
-import java.util.concurrent.CompletableFuture;
-
-/**
- * Implements PeerConnector over plain TCP.
- * Each method opens a fresh connection per request — simple and stateless.
- * Connection pooling is a Phase 4 optimization.
- */
-public class TcpPeerConnector implements PeerConnector {
-
-    private static final int TIMEOUT_MS = 10_000;
-
-    @Override
-    public CompletableFuture<byte[]> fetchChunkAsync(PeerInfo peer, ChunkId id, int size) {
-        return CompletableFuture.supplyAsync(() -> {
-            try (Socket socket = new Socket()) {
-                socket.connect(peer.address(), TIMEOUT_MS);
-                socket.setSoTimeout(TIMEOUT_MS);
-
-                var out = new DataOutputStream(socket.getOutputStream());
-                var in  = new DataInputStream(socket.getInputStream());
-
-                FrameEncoder.writeChunkRequest(out, id.manifestHash(), id.index());
-
-                byte status  = in.readByte();
-                int dataLen  = in.readInt();
-
-                if (status != 0x00) throw new IOException("Peer returned status: " + status);
-
-                return FrameDecoder.readExactly(in, dataLen);
-            } catch (IOException e) {
-                throw new RuntimeException("Chunk fetch failed: " + id, e);
-            }
-        }); // runs on common pool; each call is a new virtual thread if called from VT executor
-    }
-
-    @Override
-    public CompletableFuture<BitSet> fetchPieceMapAsync(PeerInfo peer, String manifestHash) {
-        return CompletableFuture.supplyAsync(() -> {
-            try (Socket socket = new Socket()) {
-                socket.connect(peer.address(), TIMEOUT_MS);
-                socket.setSoTimeout(TIMEOUT_MS);
-
-                var out = new DataOutputStream(socket.getOutputStream());
-                var in  = new DataInputStream(socket.getInputStream());
-
-                FrameEncoder.writePieceMapRequest(out, manifestHash);
-
-                byte status  = in.readByte();
-                int dataLen  = in.readInt();
-
-                if (status != 0x00) throw new IOException("PieceMap request failed: " + status);
-
-                byte[] bitSetBytes = FrameDecoder.readExactly(in, dataLen);
-                return BitSet.valueOf(bitSetBytes); // reconstruct BitSet from byte array
-            } catch (IOException e) {
-                throw new RuntimeException("PieceMap fetch failed for peer: " + peer.id(), e);
-            }
-        });
-    }
-}
-```
+- **`TcpChunkServer`** — `bind()` opens the socket (so "address already in use"
+  surfaces immediately and `port 0` resolves to a real port), `serve()` runs the
+  accept loop, `start()` does both. Each connection is handled on its own virtual
+  thread. `close()` stops accepting and waits for in-flight handlers before the
+  caller closes storage.
+- **`TcpPeerConnector`** — each fetch runs on its own virtual thread, opens a
+  socket, sends one request, validates status and length, and reads exactly the
+  payload. Errors carry the peer address, e.g.
+  `Chunk fetch failed: chunk 3 from 10.0.0.7:7070: Peer returned status 0x01`.
 
 ---
 
 ## 9. Concurrency Model
 
-### Why Virtual Threads (Project Loom)?
+### Virtual threads
 
-Traditional thread-per-connection: OS threads are expensive (~1 MB stack each). 100 concurrent downloads = 100 MB of thread stacks + kernel scheduling overhead.
-
-Virtual threads: cheap JVM-managed fibers (~few KB each). 10,000 concurrent downloads is routine. The key: **blocking I/O on a virtual thread does not block an OS thread** — the JVM parks the virtual thread and the carrier OS thread is freed.
+A platform thread costs about 1 MB of stack and a kernel thread; a virtual thread
+costs a few KB. Blocking I/O on a virtual thread parks it and frees the carrier
+thread, so the code stays plain and blocking while scaling to thousands of
+concurrent transfers.
 
 ```
-OS Threads (few, ~= CPU cores)
-    ↑ mount/unmount
-Virtual Threads (many, ~= concurrent tasks)
-    ↑ execute
-Your blocking code (Socket.read(), FileChannel.write())
+Carrier (platform) threads ≈ CPU cores
+        ▲ mount / unmount
+Virtual threads ≈ one per chunk download, one per server connection
+        ▲ run
+Plain blocking code: Socket.read(), FileChannel.write()
 ```
 
-You write plain blocking code. Loom handles the scheduling.
+### Where concurrency lives
 
-### The Semaphore — Backpressure
-
-Without a semaphore, submitting 10,000 virtual threads all hitting the network simultaneously can saturate socket buffers and cause thundering herd. A `Semaphore` caps in-flight downloads.
+| Mechanism | Used for |
+|-----------|----------|
+| `Executors.newVirtualThreadPerTaskExecutor()` | One virtual thread per missing chunk; one per accepted connection; one per outgoing fetch |
+| `Semaphore(32)` | Back-pressure: at most 32 chunk transfers in flight, across all peers |
+| `ConcurrentHashMap.replace(k, expected, next)` | Lock-free CAS state transitions — two threads can never both schedule a chunk |
+| `AtomicInteger` | Failure counters per chunk and per peer |
+| `synchronized (heldChunks)` | Updating/reading the held-chunk `BitSet` — tiny critical sections with **no I/O inside** |
+| `ReentrantLock` | `FileChannelStorage` channel lifecycle, because opening a file is I/O |
 
 ```java
-// transfer/TransferManager.java (concurrency section)
-
-// Max simultaneous chunk downloads across all peers
-private final Semaphore inflightLimit = new Semaphore(32);
-
-private void downloadChunk(ChunkDescriptor desc, PeerInfo sourcePeer) {
-    inflightLimit.acquireUninterruptibly(); // blocks virtual thread until slot available
-    try {
-        stateTracker.transition(desc.id(), ChunkState.SCHEDULED, ChunkState.IN_FLIGHT);
-
-        byte[] data = connector.fetchChunkAsync(sourcePeer, desc.id(), desc.size())
-                               .join(); // blocking join — fine on virtual thread
-
-        stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.VERIFYING);
-
-        if (!verifier.verify(data, desc.sha256())) {
-            stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.MISSING);
-            stateTracker.incrementFailure(desc.id());
-            return;
-        }
-
-        stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.VERIFIED);
-        storage.writeChunk(desc.id(), desc.offset(), data);
-        stateTracker.transition(desc.id(), ChunkState.VERIFIED, ChunkState.WRITTEN);
-
-        // Thread-safe BitSet update
-        synchronized (heldChunks) { heldChunks.set(desc.id().index()); }
-
-    } finally {
-        inflightLimit.release(); // always release, even on exception
+// The executor's close() waits for every chunk thread to finish.
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (ChunkDescriptor chunk : missing) {
+        executor.submit(() -> downloadWithRetry(chunk, source, pieceMaps));
     }
+}
+
+// Inside each download thread:
+inflightLimit.acquireUninterruptibly(); // parks the virtual thread, not a carrier
+try {
+    // fetch → verify → write
+} finally {
+    inflightLimit.release();            // always, even on failure
 }
 ```
 
-### Virtual Thread Executor Pattern
-
-```java
-// Use try-with-resources — shuts down executor and waits for all tasks on close
-try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-    for (ChunkDescriptor chunk : missingChunks) {
-        executor.submit(() -> downloadChunk(chunk, selectPeer(chunk)));
-    }
-} // blocks here until all virtual threads complete
-```
-
-### ConcurrentHashMap vs synchronized HashMap
-
-```java
-// BAD: HashMap with external synchronization — coarse lock, kills parallelism
-synchronized (states) { states.put(id, ChunkState.IN_FLIGHT); }
-
-// GOOD: ConcurrentHashMap — fine-grained locking per bucket
-states.put(id, ChunkState.IN_FLIGHT); // thread-safe, no external lock needed
-
-// BEST for state transition: atomic compare-and-swap
-boolean transitioned = states.replace(id, ChunkState.SCHEDULED, ChunkState.IN_FLIGHT);
-// Only succeeds if current value is SCHEDULED — prevents double-scheduling
-```
-
-### AtomicInteger for Counters
-
-```java
-// BAD: shared int with synchronized
-synchronized(this) { failureCount++; }
-
-// GOOD: AtomicInteger — lock-free CAS under the hood
-AtomicInteger failures = new AtomicInteger(0);
-int newCount = failures.incrementAndGet(); // atomic, no lock
-```
+The retry back-off sleep happens **after** releasing the permit, so a waiting
+chunk never blocks another chunk's transfer.
 
 ---
 
 ## 10. Transfer Orchestration
 
-```java
-// transfer/TransferManager.java
-package io.swarmshare.transfer;
+`TransferManager.start()` runs the whole download synchronously:
 
-import io.swarmshare.core.domain.*;
-import io.swarmshare.core.port.PeerConnector;
-import io.swarmshare.core.port.StorageProvider;
-import io.swarmshare.storage.ChecksumVerifier;
+1. **Validate** the manifest (§12); an inconsistent manifest fails before any I/O.
+2. **Pre-allocate** the output file (`StorageProvider.preallocateSpace`).
+3. **Resume**: `checkExistingChunks` marks every valid chunk `WRITTEN`
+   (`Resuming: 1 of 3 chunks already on disk`). If nothing is missing, no peer is
+   contacted at all.
+4. **Collect piece maps** from every peer in parallel; peers that do not answer
+   are left out instead of failing the transfer.
+5. **Schedule** one virtual thread per missing chunk, with a source chosen by
+   peer selection. Chunks no reachable peer advertises are reported once, in
+   aggregate.
+6. **Download** each chunk: fetch → verify SHA-256 → write at offset → set its bit.
+   Failures retry per §11.
+7. **Verify the whole file**: every chunk must be held; storage is flushed; the
+   file is re-read chunk by chunk and its SHA-256 compared with `fileHash`.
 
-import java.util.BitSet;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
+### Peer selection
 
-/**
- * Central orchestrator. Coordinates the full download pipeline:
- *   1. Resume: scan disk for already-held chunks
- *   2. Collect piece maps from all known peers
- *   3. Schedule downloads: assign each missing chunk to a peer that holds it
- *   4. For each downloaded chunk: verify, store, update state
- *   5. When all chunks are WRITTEN: verify the whole-file hash
- */
-public class TransferManager {
+The first peer, **in the order the user listed them**, whose piece map advertises
+the chunk and that is not banned. The peer list doubles as a priority list, and
+behaviour is deterministic. (Rarest-first or latency-based selection would plug
+in here.)
 
-    private static final int MAX_INFLIGHT  = 32;
-    private static final int MAX_RETRIES   = 3;
+### Failures it reports
 
-    private final Manifest manifest;
-    private final List<PeerInfo> peers;
-    private final StorageProvider storage;
-    private final PeerConnector connector;
-    private final ChecksumVerifier verifier;
-    private final ChunkStateTracker stateTracker;
-    private final Semaphore inflightLimit = new Semaphore(MAX_INFLIGHT);
-    private final BitSet heldChunks;
-
-    public TransferManager(Manifest manifest, List<PeerInfo> peers,
-                            StorageProvider storage, PeerConnector connector) {
-        this.manifest     = manifest;
-        this.peers        = peers;
-        this.storage      = storage;
-        this.connector    = connector;
-        this.verifier     = new ChecksumVerifier();
-        this.stateTracker = new ChunkStateTracker();
-        this.heldChunks   = new BitSet(manifest.totalChunks());
-    }
-
-    public void start() {
-        // Step 1: Pre-allocate output file
-        storage.preallocateSpace(manifest.totalSize());
-
-        // Step 2: Resume — check which chunks already exist on disk
-        BitSet existing = storage.checkExistingChunks(manifest);
-        existing.stream().forEach(i -> {
-            heldChunks.set(i);
-            stateTracker.initialize(manifest.chunkAt(i).id());
-            stateTracker.transition(manifest.chunkAt(i).id(), ChunkState.MISSING, ChunkState.WRITTEN);
-        });
-
-        // Step 3: Collect piece maps from all peers
-        Map<PeerInfo, BitSet> peerPieceMaps = collectPieceMaps();
-
-        // Step 4: Schedule downloads
-        List<ChunkDescriptor> missing = manifest.chunks().stream()
-            .filter(desc -> !heldChunks.get(desc.id().index()))
-            .toList();
-
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (ChunkDescriptor chunk : missing) {
-                stateTracker.initialize(chunk.id());
-                PeerInfo source = selectPeer(chunk.id().index(), peerPieceMaps);
-                if (source == null) {
-                    System.err.println("No peer has chunk " + chunk.id().index());
-                    continue;
-                }
-                stateTracker.transition(chunk.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
-                executor.submit(() -> downloadWithRetry(chunk, source, peerPieceMaps));
-            }
-        } // awaits all virtual threads
-
-        // Step 5: Final file integrity check
-        verifyCompleteFile();
-    }
-
-    private void downloadWithRetry(ChunkDescriptor desc, PeerInfo initial,
-                                    Map<PeerInfo, BitSet> pieceMaps) {
-        int attempts = 0;
-        PeerInfo source = initial;
-        while (attempts < MAX_RETRIES) {
-            inflightLimit.acquireUninterruptibly();
-            try {
-                stateTracker.transition(desc.id(), ChunkState.SCHEDULED, ChunkState.IN_FLIGHT);
-                byte[] data = connector.fetchChunkAsync(source, desc.id(), desc.size()).join();
-
-                stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.VERIFYING);
-
-                if (verifier.verify(data, desc.sha256())) {
-                    storage.writeChunk(desc.id(), desc.offset(), data);
-                    stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.WRITTEN);
-                    synchronized (heldChunks) { heldChunks.set(desc.id().index()); }
-                    return; // success
-                }
-
-                // Hash mismatch — try a different peer next attempt
-                stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.MISSING);
-                stateTracker.incrementFailure(desc.id());
-                source = selectAlternativePeer(desc.id().index(), source, pieceMaps);
-                if (source == null) break;
-                stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
-
-            } catch (Exception e) {
-                stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.MISSING);
-                stateTracker.incrementFailure(desc.id());
-                source = selectAlternativePeer(desc.id().index(), source, pieceMaps);
-                if (source == null) break;
-                stateTracker.transition(desc.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
-            } finally {
-                inflightLimit.release();
-            }
-            attempts++;
-        }
-        System.err.println("FAILED: chunk " + desc.id().index() + " after " + attempts + " attempts");
-    }
-
-    private Map<PeerInfo, BitSet> collectPieceMaps() {
-        Map<PeerInfo, BitSet> result = new ConcurrentHashMap<>();
-        List<CompletableFuture<Void>> futures = peers.stream()
-            .map(peer -> connector.fetchPieceMapAsync(peer, manifest.fileHash())
-                .thenAccept(bitset -> result.put(peer, bitset))
-                .exceptionally(ex -> { /* peer unreachable, skip */ return null; }))
-            .toList();
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        return result;
-    }
-
-    /**
-     * Naive selection: first peer that holds the chunk.
-     * Future: rarest-first, load-balancing, latency-based.
-     */
-    private PeerInfo selectPeer(int chunkIndex, Map<PeerInfo, BitSet> pieceMaps) {
-        return pieceMaps.entrySet().stream()
-            .filter(e -> e.getValue().get(chunkIndex))
-            .map(Map.Entry::getKey)
-            .findFirst()
-            .orElse(null);
-    }
-
-    private PeerInfo selectAlternativePeer(int chunkIndex, PeerInfo exclude,
-                                            Map<PeerInfo, BitSet> pieceMaps) {
-        return pieceMaps.entrySet().stream()
-            .filter(e -> !e.getKey().equals(exclude))
-            .filter(e -> e.getValue().get(chunkIndex))
-            .map(Map.Entry::getKey)
-            .findFirst()
-            .orElse(null);
-    }
-
-    private void verifyCompleteFile() {
-        // Re-read the full assembled file and verify fileHash
-        // Implementation: stream file in chunks and feed to MessageDigest
-        System.out.println("Transfer complete. Verifying full file hash...");
-        // ... (exercise for Phase 5)
-    }
-}
-```
+| Situation | Result |
+|-----------|--------|
+| Manifest inconsistent | `IllegalArgumentException: Invalid manifest: …` (all violations listed) |
+| Chunks still missing after all attempts | `IllegalStateException: Transfer incomplete: 3 of 10 chunks missing (banned for corrupt data: 10.0.0.9:7070)` |
+| All chunks present but the file hash differs | `IllegalStateException: Transfer complete but file hash mismatch: …` |
 
 ---
 
 ## 11. Resilience & Retry
 
-### Exponential Backoff
+### Exponential back-off
 
 ```java
 // transfer/RetryPolicy.java
-package io.swarmshare.transfer;
-
-import java.time.Duration;
-import java.util.concurrent.TimeUnit;
-
-/**
- * Simple exponential backoff: wait initialDelay, then 2x, 4x, ...
- * Cap at maxDelay to prevent absurdly long waits.
- *
- * Example: 100ms → 200ms → 400ms → 800ms (capped at 1s) → 1s → 1s
- */
-public class RetryPolicy {
-
-    private final int maxAttempts;
-    private final Duration initialDelay;
-    private final Duration maxDelay;
-
-    public RetryPolicy(int maxAttempts, Duration initialDelay, Duration maxDelay) {
-        this.maxAttempts  = maxAttempts;
-        this.initialDelay = initialDelay;
-        this.maxDelay     = maxDelay;
-    }
-
-    /**
-     * Compute wait duration for attempt N (0-indexed).
-     * Uses bit-shift for fast 2^n: 1 << n
-     */
-    public Duration delayFor(int attempt) {
-        long ms = initialDelay.toMillis() * (1L << attempt); // 2^attempt multiplier
-        return Duration.ofMillis(Math.min(ms, maxDelay.toMillis()));
-    }
-
-    public boolean shouldRetry(int attemptsDone) {
-        return attemptsDone < maxAttempts;
-    }
-
-    /** Block the calling virtual thread for the computed delay. */
-    public void sleep(int attempt) throws InterruptedException {
-        TimeUnit.MILLISECONDS.sleep(delayFor(attempt).toMillis());
-    }
+public Duration delayFor(int attempt) {       // attempt is 0-based
+    // initialDelay × 2^attempt, capped at maxDelay, overflow-safe
 }
 ```
 
-### Resume on Restart
+`TransferManager` uses **3 attempts per chunk**, waiting 100 ms, then 200 ms
+(capped at 2 s). The arithmetic is overflow-safe for any attempt number.
 
-On startup, `FileChannelStorage.checkExistingChunks()` reads each byte range and verifies the checksum. If it passes: chunk is marked WRITTEN in the state tracker and the BitSet. The `TransferManager` skips it. This is "free" resume with no extra metadata file needed.
+### Fail over to another peer
+
+After a failed attempt the next attempt goes to the next peer that advertises the
+chunk; if there is none, the same peer is tried again (a transient error may
+pass). A chunk that exhausts its attempts is left `MISSING` and reported at the
+end.
+
+### Ban corrupt peers
+
+`PeerBanList` counts, per peer, the chunks that **failed SHA-256 verification**.
+At 3 the peer is banned for the rest of the transfer:
+
+- banned peers are skipped for first attempts, retries and the same-peer fallback;
+- a chunk queued for a peer that gets banned while it waits re-picks its source;
+- the ban is logged once — `Banned peer 10.0.0.9:7070 after 3 chunks failed checksum verification` —
+  and named in the error if the transfer cannot complete.
+
+Timeouts and refused connections never count: they show that a peer is
+unreachable, not that it lies, and failover already handles them.
+
+### Resume on restart
+
+See §7: every chunk range already on disk is re-hashed; only valid chunks are
+kept. An interrupted download picks up where it stopped and fetches only what is
+still missing.
 
 ---
 
-## 12. Manifest Builder & Serialization
+## 12. Manifest Builder, Serialization & Validation
 
-```java
-// manifest/ManifestBuilder.java
-package io.swarmshare.manifest;
+### `ManifestBuilder` — streaming, single pass
 
-import io.swarmshare.core.domain.ChunkDescriptor;
-import io.swarmshare.core.domain.ChunkId;
-import io.swarmshare.core.domain.Manifest;
-import io.swarmshare.storage.ChecksumVerifier;
+Reads the file once through a `FileChannel`, one chunk at a time, so heap use is
+bounded by `chunkSize` whatever the file size. Each chunk's bytes feed both the
+per-chunk hash and an incremental whole-file `MessageDigest`. Because `ChunkId`
+needs the whole-file hash, chunk metadata is collected first and turned into
+`ChunkDescriptor`s once the file hash is known.
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
+| Constant | Value |
+|----------|-------|
+| `DEFAULT_CHUNK_SIZE` | 1 MiB — balances round-trips with per-chunk overhead |
+| `MAX_CHUNK_SIZE` | 16 MiB — larger chunks from a hostile manifest would force huge buffers |
 
-/**
- * Splits a file into chunks and builds the manifest.
- * Called once by the seeder before advertising to peers.
- *
- * Uses Files.readAllBytes for simplicity in Phase 1.
- * For files > ~500MB: replace with FileChannel + MappedByteBuffer to avoid heap OOM.
- */
-public class ManifestBuilder {
+An empty file is rejected: there is nothing to share.
 
-    public static final int DEFAULT_CHUNK_SIZE = 1024 * 1024; // 1 MB
+### `ManifestSerializer` — JSON via Jackson
 
-    private final ChecksumVerifier verifier = new ChecksumVerifier();
+The domain records stay annotation-free; private DTO records carry the Jackson
+annotations and map the flat JSON (`index`, `offset`, `size`, `sha256`) to and
+from nested `ChunkDescriptor`/`ChunkId`. The JSON field names are a wire contract.
+The DTOs ship their own GraalVM metadata
+(`META-INF/native-image/io.swarmshare/manifest/reachability-metadata.json`).
 
-    public Manifest build(Path filePath, int chunkSize) throws IOException {
-        byte[] fileBytes  = Files.readAllBytes(filePath);
-        String fileHash   = verifier.compute(fileBytes);
-        String fileName   = filePath.getFileName().toString();
-        long totalSize    = fileBytes.length;
-        List<ChunkDescriptor> chunks = new ArrayList<>();
+### `ManifestValidator` — trust nothing
 
-        for (int i = 0; i < fileBytes.length; i += chunkSize) {
-            int end      = Math.min(i + chunkSize, fileBytes.length);
-            byte[] chunk = new byte[end - i];
-            System.arraycopy(fileBytes, i, chunk, 0, chunk.length);
+A manifest received from elsewhere is validated before use. `validate` returns a
+sealed `ValidationResult` (`Valid` or `Invalid` with **every** violation):
 
-            int index       = i / chunkSize;
-            String chunkHash = verifier.compute(chunk);
-            ChunkId id      = new ChunkId(fileHash, index);
-
-            chunks.add(new ChunkDescriptor(id, i, chunk.length, chunkHash));
-        }
-
-        return new Manifest(fileHash, fileName, totalSize, chunkSize, chunks);
-    }
-}
-```
-
-```java
-// manifest/ManifestSerializer.java
-package io.swarmshare.manifest;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.swarmshare.core.domain.Manifest;
-
-import java.io.IOException;
-import java.nio.file.Path;
-
-/**
- * JSON serialization via Jackson.
- * The manifest file is shared to all peers before any chunk transfer.
- * Human-readable JSON is fine — it's written once and is tiny compared to the file.
- */
-public class ManifestSerializer {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper()
-        .enable(com.fasterxml.jackson.databind.SerializationFeature.INDENT_OUTPUT);
-
-    public void write(Manifest manifest, Path outputPath) throws IOException {
-        MAPPER.writeValue(outputPath.toFile(), manifest);
-    }
-
-    public Manifest read(Path manifestPath) throws IOException {
-        return MAPPER.readValue(manifestPath.toFile(), Manifest.class);
-    }
-}
-```
+- `fileHash` and `fileName` present; `fileHash` and every chunk `sha256` are
+  64-character SHA-256 hex;
+- `totalSize` and `chunkSize` positive; `chunkSize` ≤ 16 MiB;
+- at least one chunk; indices contiguous from 0; each `ChunkId` names this manifest;
+- each offset equals the sum of the sizes before it;
+- every chunk except the last is exactly `chunkSize`; the last is at most `chunkSize`;
+- the chunk sizes add up to `totalSize`.
 
 ---
 
-## 13. CLI Entry Points
+## 13. Command-Line Interface
 
-```java
-// cli/SwarmShareCli.java
-package io.swarmshare.cli;
+Built on picocli. The JVM distribution installs `bin/swarm-share`; the native
+build produces a single `swarm-share` executable.
 
-import picocli.CommandLine;
-import picocli.CommandLine.Command;
-
-@Command(
-    name = "swarm-share",
-    description = "P2P chunk-based file sharing",
-    subcommands = { SeedCommand.class, LeechCommand.class, CommandLine.HelpCommand.class }
-)
-public class SwarmShareCli implements Runnable {
-
-    public static void main(String[] args) {
-        int exitCode = new CommandLine(new SwarmShareCli()).execute(args);
-        System.exit(exitCode);
-    }
-
-    @Override public void run() {
-        CommandLine.usage(this, System.out);
-    }
-}
+```
+swarm-share seed  --file <file> [--port <port>] [--manifest-out <path>]
+swarm-share leech --manifest <path> --peer <host:port>... --output <path>
+swarm-share build-manifest <file> [<chunkSize>] [-o <path>]
+swarm-share download <manifest> <output> <host:port>...
+swarm-share help [<command>]
 ```
 
-```java
-// cli/SeedCommand.java
-package io.swarmshare.cli;
+| Command | What it does |
+|---------|--------------|
+| `seed` | Builds the manifest, writes it (default `<file>.manifest.json`, or `--manifest-out`), then serves every chunk on `--port` (default 7070; `0` = any free port) until stopped. Prints `Manifest hash:`, `Total chunks:`, `Manifest file:` and `Listening on port <n>`. The positional form `seed <file> [<port>]` also works. |
+| `leech` | Validates the manifest, downloads into `--output` (resuming from what is already there) from the `--peer`s, in order of preference, and prints `Download complete: <path>`. |
+| `build-manifest` | Writes a manifest without serving; prints `fileHash=`, `totalChunks=` and friends. |
+| `download` | `leech` with positional arguments, kept for scripts written for earlier releases. |
+| `help` | Usage of any command; every command also accepts `-h/--help`. |
 
-import io.swarmshare.manifest.ManifestBuilder;
-import io.swarmshare.manifest.ManifestSerializer;
-import io.swarmshare.networking.TcpChunkServer;
-import io.swarmshare.storage.FileChannelStorage;
-import picocli.CommandLine.Command;
-import picocli.CommandLine.Option;
+**Exit codes:** `0` success · `1` the command failed — one line on stderr,
+`<command> failed: <reason>`, no stack trace · `2` invalid usage.
 
-import java.nio.file.Path;
-import java.util.BitSet;
+**Output:** results go to stdout; progress and diagnostics to stderr as one line
+per record, `[INFO] …` / `[WARNING] …`.
 
-@Command(name = "seed", description = "Announce and serve a file to the swarm")
-public class SeedCommand implements Runnable {
-
-    @Option(names = "--file",   required = true,  description = "Path to file to seed")
-    private Path filePath;
-
-    @Option(names = "--port",   defaultValue = "7070", description = "TCP port to listen on")
-    private int port;
-
-    @Option(names = "--manifest-out", description = "Where to write the manifest JSON")
-    private Path manifestOut;
-
-    @Override
-    public void run() {
-        try {
-            var builder    = new ManifestBuilder();
-            var manifest   = builder.build(filePath, ManifestBuilder.DEFAULT_CHUNK_SIZE);
-            var serializer = new ManifestSerializer();
-
-            if (manifestOut != null) serializer.write(manifest, manifestOut);
-            System.out.println("Manifest hash: " + manifest.fileHash());
-            System.out.println("Total chunks:  " + manifest.totalChunks());
-
-            // For the seeder, all chunks are available from the start
-            BitSet heldChunks = new BitSet(manifest.totalChunks());
-            heldChunks.set(0, manifest.totalChunks()); // mark all as held
-
-            var storage = new FileChannelStorage(filePath);
-            storage.preallocateSpace(manifest.totalSize());
-
-            var server = new TcpChunkServer(port, storage, manifest, heldChunks);
-            server.start(); // blocks until interrupted
-        } catch (Exception e) {
-            System.err.println("Seed failed: " + e.getMessage());
-        }
-    }
-}
-```
+The commands are thin: they parse arguments, build adapters, and call the domain.
 
 ```java
-// cli/LeechCommand.java
-package io.swarmshare.cli;
-
-import io.swarmshare.core.domain.PeerInfo;
-import io.swarmshare.manifest.ManifestSerializer;
-import io.swarmshare.networking.TcpPeerConnector;
-import io.swarmshare.storage.FileChannelStorage;
-import io.swarmshare.transfer.TransferManager;
-import picocli.CommandLine.Command;
-import picocli.CommandLine.Option;
-
-import java.net.InetSocketAddress;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.UUID;
-
-@Command(name = "leech", description = "Download a file from the swarm")
-public class LeechCommand implements Runnable {
-
-    @Option(names = "--manifest", required = true, description = "Path to manifest JSON")
-    private Path manifestPath;
-
-    @Option(names = "--peer", required = true, description = "host:port of a known peer",
-            arity = "1..*")
-    private List<String> peerAddresses;
-
-    @Option(names = "--output", required = true, description = "Output file path")
-    private Path outputPath;
-
-    @Override
-    public void run() {
-        try {
-            var manifest  = new ManifestSerializer().read(manifestPath);
-            var connector = new TcpPeerConnector();
-            var storage   = new FileChannelStorage(outputPath);
-
-            List<PeerInfo> peers = peerAddresses.stream()
-                .map(addr -> {
-                    String[] parts = addr.split(":");
-                    return new PeerInfo(UUID.randomUUID(),
-                        new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
-                })
-                .toList();
-
-            var manager = new TransferManager(manifest, peers, storage, connector);
-            manager.start();
-
-            System.out.println("Download complete: " + outputPath);
-        } catch (Exception e) {
-            System.err.println("Leech failed: " + e.getMessage());
-        }
-    }
+// LeechCommand.download — shared by leech and download
+Manifest manifest = new ManifestSerializer().read(manifestFile);
+// validate first: a bad manifest must not create or truncate the output file
+List<PeerInfo> peers = peerAddresses.stream().map(PeerAddresses::parse).toList();
+try (var storage = new FileChannelStorage(output);
+     var connector = new TcpPeerConnector()) {
+    new TransferManager(manifest, peers, storage, connector).start();
 }
+out.println("Download complete: " + output);
 ```
 
 ---
@@ -1579,276 +724,104 @@ public class LeechCommand implements Runnable {
 
 ```
 swarm-share-lite/
-├── build.gradle.kts
+├── build.gradle.kts              module graph, JaCoCo, aggregated coverage
 ├── settings.gradle.kts
-├── config/
-│   └── default.conf
-│
-├── core/
-│   └── src/
-│       ├── main/java/io/swarmshare/core/
-│       │   ├── domain/
-│       │   │   ├── ChunkId.java
-│       │   │   ├── ChunkDescriptor.java
-│       │   │   ├── ChunkState.java
-│       │   │   ├── Manifest.java
-│       │   │   ├── PeerInfo.java
-│       │   │   └── TransferResult.java
-│       │   └── port/
-│       │       ├── StorageProvider.java
-│       │       └── PeerConnector.java
-│       └── test/java/io/swarmshare/core/
-│           ├── domain/ManifestTest.java
-│           └── domain/ChunkIdTest.java
-│
-├── manifest/
-│   └── src/
-│       ├── main/java/io/swarmshare/manifest/
-│       │   ├── ManifestBuilder.java
-│       │   └── ManifestSerializer.java
-│       └── test/java/io/swarmshare/manifest/
-│           └── ManifestBuilderTest.java
-│
-├── storage/
-│   └── src/
-│       ├── main/java/io/swarmshare/storage/
-│       │   ├── FileChannelStorage.java
-│       │   ├── InMemoryStorage.java        ← test double
-│       │   └── ChecksumVerifier.java
-│       └── test/java/io/swarmshare/storage/
-│           ├── FileChannelStorageTest.java
-│           └── ChecksumVerifierTest.java
-│
-├── networking/
-│   └── src/
-│       ├── main/java/io/swarmshare/networking/
-│       │   ├── FrameEncoder.java
-│       │   ├── FrameDecoder.java
-│       │   ├── TcpChunkServer.java
-│       │   └── TcpPeerConnector.java
-│       └── test/java/io/swarmshare/networking/
-│           ├── FrameRoundtripTest.java
-│           └── TcpIntegrationTest.java
-│
-├── transfer/
-│   └── src/
-│       ├── main/java/io/swarmshare/transfer/
-│       │   ├── TransferManager.java
-│       │   ├── ChunkStateTracker.java
-│       │   └── RetryPolicy.java
-│       └── test/java/io/swarmshare/transfer/
-│           ├── TransferManagerTest.java
-│           └── ChunkStateTrackerTest.java
-│
+├── docs/
+│   ├── ASSUMPTIONS.md            decisions where this spec is silent
+│   └── images/swarm-overview.svg
+├── core/src/main/java/io/swarmshare/core/
+│   ├── domain/                   ChunkId, ChunkDescriptor, Manifest, PeerInfo,
+│   │                             ChunkState, TransferResult
+│   ├── port/                     StorageProvider, PeerConnector
+│   └── crypto/                   HasherPort, Sha256
+├── manifest/src/main/java/io/swarmshare/manifest/
+│   └── ManifestBuilder, ManifestSerializer, ManifestValidator
+├── storage/src/main/java/io/swarmshare/storage/
+│   └── FileChannelStorage
+├── networking/src/main/java/io/swarmshare/networking/
+│   └── FrameEncoder, FrameDecoder, TcpChunkServer, TcpPeerConnector
+├── transfer/src/main/java/io/swarmshare/transfer/
+│   └── TransferManager, ChunkStateTracker, RetryPolicy, PeerBanList
 └── cli/
-    └── src/main/java/io/swarmshare/cli/
-        ├── SwarmShareCli.java
-        ├── SeedCommand.java
-        └── LeechCommand.java
+    ├── build.gradle.kts          application, native image, e2e suites
+    ├── src/main/java/io/swarmshare/cli/
+    │   └── SwarmShareCli, SeedCommand, LeechCommand, BuildManifestCommand,
+    │       DownloadCommand, PeerAddresses, ManifestFiles, HelpOption
+    └── src/e2eTest/java/io/swarmshare/e2e/
+        └── SwarmCli, CliEndToEndTest, LanSwarmTest
 ```
+
+Every module has `src/test/java` mirroring its main package.
 
 ---
 
 ## 15. Build Configuration
 
-```kotlin
-// settings.gradle.kts
-rootProject.name = "swarm-share-lite"
+Gradle 9 (wrapper included), Kotlin DSL, Java toolchain 25.
 
-include("core", "manifest", "storage", "networking", "transfer", "cli")
-```
+| Concern | Choice |
+|---------|--------|
+| Module graph | Declared once in the root `build.gradle.kts` |
+| Runtime libraries | Jackson Databind (manifest), picocli (cli) |
+| Test libraries | JUnit Jupiter 6, AssertJ, Testcontainers (e2e only) |
+| Coverage | JaCoCo per module + `jacocoAggregatedReport` across modules |
+| JVM packaging | `application` plugin → `cli/build/install/swarm-share` and a zip |
+| Native packaging | `org.graalvm.buildtools.native`; picocli metadata generated by `picocli-codegen`; Jackson metadata from the GraalVM reachability-metadata repository |
 
-```kotlin
-// build.gradle.kts (root)
-plugins {
-    java
-}
+| Task | Result |
+|------|--------|
+| `./gradlew build` | Compile, unit tests, e2e tests against the JVM distribution, coverage reports |
+| `./gradlew jacocoAggregatedReport` | `build/reports/jacoco/jacocoAggregatedReport/` |
+| `./gradlew :cli:installDist` | `cli/build/install/swarm-share/bin/swarm-share` |
+| `./gradlew :cli:nativeCompile` | `cli/build/native/nativeCompile/swarm-share` (needs GraalVM 25) |
+| `./gradlew :cli:nativeE2eTest` | The same e2e suite against the native executable |
 
-allprojects {
-    group   = "io.swarmshare"
-    version = "0.1.0-SNAPSHOT"
-    repositories { mavenCentral() }
-}
-
-subprojects {
-    apply(plugin = "java")
-
-    java {
-        toolchain {
-            languageVersion = JavaLanguageVersion.of(25)
-        }
-    }
-
-    dependencies {
-        testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
-        testImplementation("org.assertj:assertj-core:3.26.3")
-        testImplementation("org.mockito:mockito-core:5.14.2")
-    }
-
-    tasks.test {
-        useJUnitPlatform()
-    }
-}
-
-// Module dependency graph — enforces clean architecture
-project(":manifest")    { dependencies { implementation(project(":core")) } }
-project(":storage")     { dependencies { implementation(project(":core")) } }
-project(":networking")  { dependencies { implementation(project(":core")) } }
-project(":transfer")    { dependencies {
-    implementation(project(":core"))
-    implementation(project(":storage"))
-} }
-project(":cli")         { dependencies {
-    implementation(project(":core"))
-    implementation(project(":manifest"))
-    implementation(project(":storage"))
-    implementation(project(":networking"))
-    implementation(project(":transfer"))
-    implementation("info.picocli:picocli:4.7.6")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.18.1")
-} }
-```
+CI (`.github/workflows/gradle.yml`) runs two jobs on every push and pull request:
+the JVM build with all tests and coverage, and the native build with the e2e
+suite against the native executable.
 
 ---
 
 ## 16. Testing Strategy
 
-### Test Doubles (Fakes, not Mocks)
+Tests are written first and prefer **fakes over mocks** — the codebase uses no
+mocking library.
 
-Prefer **fakes** over Mockito mocks for core interfaces — they're more realistic:
+| Layer | Where | What it uses |
+|-------|-------|--------------|
+| Unit | every module's `src/test` | Real records, `InMemoryStorage`, `FakePeerConnector` (peers that are down, drop connections, serve corrupt data, hold some chunks), scripted raw-socket peers |
+| Integration | `networking/src/test` | Real TCP on loopback and real files: `TwoNodeIntegrationTest`, `FailureScenariosIntegrationTest` (connection dropped mid-chunk, corrupt seeder, interrupted download resumed) |
+| End-to-end | `cli/src/e2eTest` | The packaged CLI as separate OS processes: seed → leech, failover, resume and repair, corrupt-seeder ban, clear failures |
+| Multi-host | `LanSwarmTest` | A seeder and two leechers as separate containers on a Docker network (Testcontainers), reached by host name |
 
-```java
-// test double: InMemoryStorage.java
-public class InMemoryStorage implements StorageProvider {
-    private final Map<Integer, byte[]> store = new ConcurrentHashMap<>();
-    private long allocatedSize;
+The e2e suite takes the executable from the `swarm.cli` system property, so the
+**same tests** verify the JVM distribution (`e2eTest`) and the native binary
+(`nativeE2eTest`).
 
-    @Override public void preallocateSpace(long totalSize) { allocatedSize = totalSize; }
+### Patterns worth copying
 
-    @Override public void writeChunk(ChunkId id, long offset, byte[] data) {
-        store.put(id.index(), data.clone());
-    }
-
-    @Override public Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
-        return Optional.ofNullable(store.get(id.index())).map(byte[]::clone);
-    }
-
-    @Override public BitSet checkExistingChunks(Manifest manifest) {
-        BitSet bs = new BitSet(manifest.totalChunks());
-        store.keySet().forEach(bs::set);
-        return bs;
-    }
-}
-```
-
-### Unit Test Examples
+- **Determinism over sleeps.** Servers bind to port `0` and report the real port;
+  tests wait for that line instead of sleeping. A "dead peer" is `127.0.0.1:1`,
+  never a just-released ephemeral port another parallel test could reuse.
+- **Observable concurrency.** The fake connector runs fetches on virtual threads
+  and records the peak number in flight, so the 32-transfer limit is asserted,
+  not assumed.
+- **A sequential seam.** A package-private constructor lowers the in-flight limit
+  to 1, which makes "banned after exactly 3 failures, then never asked again"
+  checkable.
 
 ```java
-// ManifestBuilderTest.java
-class ManifestBuilderTest {
+@Test
+void start_corruptPeerIsBannedAfterThreeChecksumFailures_honestPeerServesTheRest() {
+    Fixture f = fixture(100, 10);                 // 10 chunks
+    f.connector().alwaysCorrupt(liar);
+    PeerBanList bans = new PeerBanList();
 
-    @Test
-    void build_splitsFileIntoCorrectChunks(@TempDir Path tmpDir) throws Exception {
-        // Arrange: 2.5 MB file with 1 MB chunks → 3 chunks (1MB, 1MB, 0.5MB)
-        byte[] content = new byte[2_621_440]; // 2.5 MB
-        new Random(42).nextBytes(content);
-        Path file = tmpDir.resolve("test.bin");
-        Files.write(file, content);
+    sequential(f, List.of(liar, honest), bans).start();
 
-        // Act
-        Manifest manifest = new ManifestBuilder().build(file, 1_048_576);
-
-        // Assert
-        assertThat(manifest.totalChunks()).isEqualTo(3);
-        assertThat(manifest.chunks().get(0).size()).isEqualTo(1_048_576);
-        assertThat(manifest.chunks().get(2).size()).isEqualTo(524_288); // last chunk
-        assertThat(manifest.totalSize()).isEqualTo(2_621_440);
-    }
-
-    @Test
-    void build_computesCorrectChunkChecksum(@TempDir Path tmpDir) throws Exception {
-        byte[] data   = "hello world".getBytes(StandardCharsets.UTF_8);
-        Path file     = tmpDir.resolve("hello.txt");
-        Files.write(file, data);
-
-        Manifest manifest = new ManifestBuilder().build(file, 1024);
-
-        String expected = new ChecksumVerifier().compute(data);
-        assertThat(manifest.chunks().get(0).sha256()).isEqualTo(expected);
-    }
-}
-```
-
-```java
-// TransferManagerTest.java — no network, no disk
-class TransferManagerTest {
-
-    @Test
-    void start_downloadsAllChunksFromPeer() {
-        // Arrange: 3-chunk manifest
-        Manifest manifest = buildTestManifest(3);
-        InMemoryStorage storage  = new InMemoryStorage();
-        FakePeerConnector connector = new FakePeerConnector(manifest); // serves all chunks
-
-        var manager = new TransferManager(manifest,
-            List.of(somePeer()), storage, connector);
-
-        // Act
-        manager.start();
-
-        // Assert: all chunks written
-        BitSet held = storage.checkExistingChunks(manifest);
-        assertThat(held.cardinality()).isEqualTo(3);
-    }
-
-    @Test
-    void start_retries_onChecksumMismatch() {
-        // FakePeerConnector returns corrupt data on first call, correct on second
-        // Assert: chunk still ends up WRITTEN after retry
-    }
-}
-```
-
-### Integration Test — Two JVMs in-process
-
-```java
-// TwoNodeIntegrationTest.java
-class TwoNodeIntegrationTest {
-
-    @Test
-    void seederAndLeecher_transferFile(@TempDir Path tmpDir) throws Exception {
-        Path srcFile  = tmpDir.resolve("source.bin");
-        Path outFile  = tmpDir.resolve("output.bin");
-
-        // Write 5 MB test file
-        byte[] data = new byte[5_242_880];
-        new Random().nextBytes(data);
-        Files.write(srcFile, data);
-
-        Manifest manifest = new ManifestBuilder().build(srcFile, 1_048_576);
-
-        // Start seeder on port 17070 in a background thread
-        var storage   = new FileChannelStorage(srcFile);
-        storage.preallocateSpace(manifest.totalSize());
-        BitSet held = new BitSet(manifest.totalChunks());
-        held.set(0, manifest.totalChunks());
-        var server = new TcpChunkServer(17070, storage, manifest, held);
-        Thread.startVirtualThread(() -> {
-            try { server.start(); } catch (IOException ignored) {}
-        });
-        Thread.sleep(200); // let server start
-
-        // Run leecher
-        var outStorage = new FileChannelStorage(outFile);
-        var connector  = new TcpPeerConnector();
-        PeerInfo seeder = new PeerInfo(UUID.randomUUID(),
-            new InetSocketAddress("localhost", 17070));
-        var manager = new TransferManager(manifest, List.of(seeder), outStorage, connector);
-        manager.start();
-
-        // Assert: files are byte-identical
-        assertThat(Files.readAllBytes(outFile)).isEqualTo(data);
-    }
+    assertStorageHoldsFile(f);
+    assertThat(bans.isBanned(liar)).isTrue();
+    assertThat(f.connector().fetchesFrom(liar)).isEqualTo(3); // no requests after the ban
 }
 ```
 
@@ -1856,739 +829,326 @@ class TwoNodeIntegrationTest {
 
 ## 17. Phased Roadmap
 
-### Phase 1 — Domain & TDD (Week 1)
+All six phases are implemented. Status as of **v1.0.0**:
 
-**Goal:** Build all domain types. Write comprehensive tests before any I/O.
+| Phase | Goal | Status | Release |
+|-------|------|--------|---------|
+| 1 — Domain & TDD | Domain records, manifest builder, SHA-256, edge-case tests | ✅ | v0.2.0 |
+| 2 — Random-access storage | Pre-allocate, positional read/write, resume scan, in-memory double | ✅ | v0.2.0 |
+| 3 — Binary TCP framing | Encoder/decoder, server and client, loopback round-trip tests | ✅ | v0.2.0 |
+| 4 — Concurrency & back-pressure | Virtual threads, semaphore, CAS state tracking | ✅ | v0.2.0 |
+| 5 — Full orchestration | Parallel piece maps, per-chunk peer selection, `seed`/`leech` CLI, two-node and LAN tests | ✅ | v0.3.0 |
+| 6 — Resilience | Back-off, resume, failover, corrupt-peer bans, failure-scenario tests | ✅ | v0.4.0 |
 
-Tasks:
-- `ChunkId`, `ChunkDescriptor`, `Manifest`, `PeerInfo`, `TransferResult`
-- `ManifestBuilder` — chunk a byte array in memory (no file I/O yet)
-- `ChecksumVerifier` — SHA-256 computation
-- Full unit test coverage for all edge cases
+Two items were deliberately not built (reasons in `docs/ASSUMPTIONS.md`):
 
-Edge cases to test: file smaller than one chunk, file exactly one chunk, file that is an exact multiple of chunkSize, empty file (error case).
+- **Phase 1, "chunk a byte array in memory"** — a learning step superseded by the
+  streaming file builder; it would be an API only tests use.
+- **Phase 4, "`AtomicReference<BitSet>` for piece-map updates"** — §20.2
+  recommends `synchronized` here, and nothing reads the map concurrently with
+  downloads. The phase's guarantees are proven by tests instead.
 
----
+### Possible next steps (not scheduled)
 
-### Phase 2 — Random-Access Storage (Week 2)
-
-**Goal:** Write and read chunks at arbitrary byte offsets.
-
-Tasks:
-- `FileChannelStorage.preallocateSpace()` — `FileChannel.truncate(size)`
-- `FileChannelStorage.writeChunk()` — `FileChannel.write(buf, offset)`
-- `FileChannelStorage.readChunk()` — `FileChannel.read(buf, offset)`
-- `FileChannelStorage.checkExistingChunks()` — scan + verify on startup
-- `InMemoryStorage` test double
-
-Key concept: `FileChannel` is **position-independent** — two threads writing to different offsets simultaneously is safe.
-
----
-
-### Phase 3 — Binary TCP Framing (Week 3)
-
-**Goal:** Send and receive chunk data over loopback TCP.
-
-Tasks:
-- `FrameEncoder` — write typed binary frames
-- `FrameDecoder` — read and parse frames, handling partial reads
-- `TcpChunkServer` — `ServerSocket` loop, virtual thread per connection
-- `TcpPeerConnector` — connect, send request, read response
-- Frame round-trip test (loopback)
-
-Key concept: `DataInputStream.readInt()` reads exactly 4 bytes in big-endian. Never assume a single `socket.read()` gives you all bytes you asked for.
-
----
-
-### Phase 4 — Concurrency & Backpressure (Week 4)
-
-**Goal:** Download multiple chunks in parallel with controlled resource usage.
-
-Tasks:
-- Virtual thread executor pattern
-- `Semaphore` for inflight limit
-- `ConcurrentHashMap` for chunk state
-- `ChunkStateTracker` with atomic CAS transitions
-- `AtomicReference<BitSet>` for piece map updates
-
-Key concept: Virtual threads block cheaply. Use `Semaphore.acquireUninterruptibly()` inside them for backpressure without callback indirection.
-
----
-
-### Phase 5 — Full Orchestration (Week 5)
-
-**Goal:** End-to-end multi-peer download with piece map coordination.
-
-Tasks:
-- `TransferManager.collectPieceMaps()` — parallel BitSet fetches
-- Peer selection per chunk
-- Full `start()` pipeline
-- Two-node integration test
-- CLI `seed` and `leech` commands working on the same machine (loopback)
-- Multi-machine test on LAN
-
----
-
-### Phase 6 — Resilience (Week 6)
-
-**Goal:** Survive failures gracefully.
-
-Tasks:
-- `RetryPolicy` with exponential backoff
-- Resume: `checkExistingChunks()` on startup
-- Peer failure detection: catch exception, try alternate peer
-- Corrupt peer detection: ban after N checksum failures
-- Full failure scenario tests (corrupt data, dropped connections)
+- Peer promotion: a leecher serves verified chunks while it is still downloading.
+- Smarter peer selection: rarest-first, load-spreading, latency-aware.
+- TLS via a new `PeerConnector`/server pair.
+- Connection reuse instead of one connection per request.
 
 ---
 
 ## 18. Java Feature Refresher
 
-Every language and API feature used in this project, with concise explanations and usage notes.
-
----
+Every language and API feature used in the project, with short notes.
 
 ### Records
 
-Records are immutable data carriers. The compiler auto-generates constructor, `equals()`, `hashCode()`, `toString()`, and accessor methods.
+Immutable data carriers; the compiler generates the constructor, accessors,
+`equals`, `hashCode` and `toString`.
 
 ```java
-public record ChunkId(String manifestHash, int index) {}
-
-// Usage:
-ChunkId id = new ChunkId("abc123", 0);
-id.manifestHash(); // accessor (not getManifestHash)
-id.index();
-
-// Compact constructor for validation (runs inside the canonical constructor):
 public record ChunkId(String manifestHash, int index) {
-    public ChunkId {  // no parameter list — uses the record's own params
+    public ChunkId {                       // compact constructor: validate only
         if (index < 0) throw new IllegalArgumentException("negative index");
     }
 }
-
-// Records are final — cannot be subclassed.
-// Records implement equals/hashCode by field value, not identity.
+ChunkId id = new ChunkId("abc123", 0);
+id.index();                                // accessor, not getIndex()
 ```
 
-**When to use:** Any time you have a data bundle with no mutable state. Replace POJOs, DTOs, value objects.
+Records are final and compare by value. Use them for any data bundle without
+mutable state. A record holding an array (`TransferResult.Success`) compares the
+array by identity — fine for a result, wrong for a map key.
 
----
+### Sealed interfaces
 
-### Sealed Classes & Interfaces
-
-Restricts which classes can implement/extend a type. Enables **exhaustive pattern matching** — the compiler ensures every case is handled.
+Restrict which types may implement an interface, so `switch` can be exhaustive.
 
 ```java
-public sealed interface TransferResult
-    permits TransferResult.Success, TransferResult.Failure {
-
-    record Success(ChunkId id, byte[] data)         implements TransferResult {}
-    record Failure(ChunkId id, String reason, boolean shouldRetry) implements TransferResult {}
+String describe(TransferResult result) {
+    return switch (result) {
+        case TransferResult.Success s                     -> "ok: " + s.data().length + " bytes";
+        case TransferResult.Failure f when f.shouldRetry() -> "retry: " + f.reason();
+        case TransferResult.Failure f                     -> "give up: " + f.reason();
+    };                                                    // no default: the compiler checks
 }
+```
 
-// Exhaustive switch — compiler error if a permit case is missing:
-TransferResult result = ...; // from network
+### Pattern matching and record patterns
+
+```java
+if (result instanceof TransferResult.Success s) { write(s.data()); }
+
 switch (result) {
-    case TransferResult.Success s  -> storage.writeChunk(s.id(), s.data());
-    case TransferResult.Failure f  -> {
-        if (f.shouldRetry()) retryQueue.add(f.id());
-        else log.error("Permanent failure: " + f.reason());
-    }
+    case TransferResult.Success(_, byte[] data) -> write(data);   // deconstruct, ignore id
+    case TransferResult.Failure(_, String reason, boolean retry) -> log(reason, retry);
 }
-// No default needed — sealed = compiler knows all cases
 ```
 
-**When to use:** Result types, state machines, discriminated unions (error/success types).
+`_` (Java 22+) names a component or lambda parameter you do not use.
 
----
-
-### Pattern Matching
-
-Switch on the **type and shape** of an object, binding it to a typed variable in one step.
+### Virtual threads (JEP 444)
 
 ```java
-// instanceof pattern (Java 16+):
-if (result instanceof TransferResult.Success s) {
-    // s is typed as Success here — no cast
-    storage.writeChunk(s.id(), s.data());
-}
-
-// Switch expression with pattern matching (Java 21+):
-String description = switch (result) {
-    case TransferResult.Success s -> "Downloaded chunk " + s.id().index();
-    case TransferResult.Failure f -> "Failed: " + f.reason();
-};
-
-// Guard pattern with when:
-String msg = switch (result) {
-    case TransferResult.Failure f when f.shouldRetry() -> "Retrying...";
-    case TransferResult.Failure f                      -> "Giving up.";
-    case TransferResult.Success s                      -> "Done.";
-};
-```
-
----
-
-### Virtual Threads (Project Loom — JEP 444)
-
-Virtual threads are lightweight JVM-managed threads. They block cheaply — parking a virtual thread frees the carrier OS thread for other work.
-
-```java
-// Create a virtual thread per task executor:
-ExecutorService exec = Executors.newVirtualThreadPerTaskExecutor();
-
-// Submit blocking tasks — each runs on its own virtual thread:
-exec.submit(() -> {
-    byte[] data = socket.read(); // blocks virtual thread, not OS thread
-    storage.write(data);
-});
-
-// Or start individual virtual threads:
-Thread vt = Thread.ofVirtual().start(() -> doWork());
-
-// Try-with-resources shuts down + awaits all tasks:
-try (var exec = Executors.newVirtualThreadPerTaskExecutor()) {
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
     for (int i = 0; i < 10_000; i++) {
-        exec.submit(() -> downloadChunk(...)); // 10,000 is fine
+        executor.submit(() -> download(...));  // 10 000 threads is fine
     }
-} // blocks here until all complete
+}                                              // close() waits for all of them
 
-// Rules:
-// 1. Avoid synchronized blocks on virtual threads (pins to carrier) — use ReentrantLock instead
-// 2. Blocking I/O (sockets, files) is the ideal use case
-// 3. CPU-bound work: use platform threads or ForkJoinPool
+Thread.ofVirtual().start(() -> serve());
 ```
 
----
+Rules of thumb: ideal for blocking I/O; CPU-bound work gains nothing; never hold a
+lock across blocking I/O. Since JDK 24 (JEP 491) `synchronized` no longer pins a
+virtual thread to its carrier, but holding *any* lock while waiting on the network
+still stalls every thread queued behind it.
 
-### CompletableFuture
-
-Represents an async computation whose result is available later. Supports chaining, combining, and exception handling.
+### `CompletableFuture`
 
 ```java
-// Basic async task:
-CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(() -> {
-    return socket.read(); // runs on common pool
-});
-
-// Chain: transform result when available:
-future.thenApply(bytes -> verifier.compute(bytes));         // sync transform
-future.thenApplyAsync(bytes -> expensiveVerify(bytes));     // async transform
-
-// Consume result:
-future.thenAccept(bytes -> storage.write(bytes));
-
-// Handle exceptions:
-future.exceptionally(ex -> {
-    log.error("Failed: " + ex.getMessage());
-    return new byte[0]; // fallback value
-});
-
-// Combine: wait for all of N futures:
-CompletableFuture.allOf(f1, f2, f3).join(); // blocks until all complete
-
-// Get result (blocks calling thread):
-byte[] result = future.join(); // throws unchecked on exception
-byte[] result = future.get();  // throws checked InterruptedException / ExecutionException
+CompletableFuture<byte[]> f = CompletableFuture.supplyAsync(this::fetch, virtualExecutor);
+f.thenApply(sha::compute);                       // transform
+f.exceptionally(ex -> fallback);                 // recover
+CompletableFuture.allOf(f1, f2, f3).join();      // wait for all
+byte[] bytes = f.join();                         // unchecked on failure; fine on a virtual thread
 ```
 
-**Key insight:** `.join()` on a virtual thread is just fine — it parks the virtual thread, not an OS thread.
+Pass an executor: without one, `supplyAsync` uses the common fork-join pool,
+which on a 2-core machine runs only one blocking task at a time.
 
----
-
-### FileChannel
-
-Position-aware I/O channel for files. Unlike `FileOutputStream`, you can read/write at any offset without seeking, and multiple threads can safely use the same channel at different positions.
+### `FileChannel`
 
 ```java
-// Open for read + write:
-FileChannel channel = FileChannel.open(path,
-    StandardOpenOption.CREATE,
-    StandardOpenOption.READ,
-    StandardOpenOption.WRITE);
-
-// Pre-allocate (extend file to exact size):
-channel.truncate(totalSize);
-
-// Write at specific offset (no seek needed):
-ByteBuffer buf = ByteBuffer.wrap(chunkData);
-channel.write(buf, offset); // thread-safe for different offsets
-
-// Read at specific offset:
-ByteBuffer buf = ByteBuffer.allocate(size);
-channel.read(buf, offset);
-byte[] result = buf.array();
-
-// Partial write/read loop (defensive):
-while (buf.hasRemaining()) {
-    channel.write(buf, offset + (buf.position())); // advance offset by written
+try (FileChannel ch = FileChannel.open(path, CREATE, READ, WRITE)) {
+    ch.truncate(size);                           // shrink only — writing the last byte grows a file
+    ByteBuffer buf = ByteBuffer.wrap(data);
+    while (buf.hasRemaining()) {
+        ch.write(buf, offset + buf.position());  // positional: no shared cursor
+    }
+    ch.force(true);                              // fsync data and metadata
 }
-
-// Close:
-channel.close(); // or use try-with-resources
 ```
 
----
-
-### ConcurrentHashMap
-
-Thread-safe `Map` implementation. Uses segment-level locking (not global) for high-concurrency reads and writes.
+### `ConcurrentHashMap`
 
 ```java
-ConcurrentHashMap<ChunkId, ChunkState> states = new ConcurrentHashMap<>();
-
-// Atomic put-if-absent:
 states.putIfAbsent(id, ChunkState.MISSING);
-
-// Atomic replace (compare-and-swap):
-boolean swapped = states.replace(id, ChunkState.SCHEDULED, ChunkState.IN_FLIGHT);
-// Only replaces if current value == SCHEDULED. Returns false if it was already something else.
-
-// Atomic compute:
-states.compute(id, (key, current) -> {
-    if (current == null || current == ChunkState.MISSING) return ChunkState.SCHEDULED;
-    return current; // leave unchanged
-});
-
-// Thread-safe iteration:
-states.forEach((id, state) -> log.info("{} -> {}", id, state));
-// Guaranteed to see all entries present at start; may or may not see concurrent updates
+boolean won = states.replace(id, ChunkState.MISSING, ChunkState.SCHEDULED); // CAS
+counts.computeIfAbsent(peer, _ -> new AtomicInteger()).incrementAndGet();
 ```
 
----
-
-### Semaphore
-
-Counting semaphore — limits the number of threads simultaneously executing a block.
+### `Semaphore`
 
 ```java
-// Allow up to 32 concurrent inflight downloads:
-Semaphore inflightLimit = new Semaphore(32);
-
-// Acquire a permit (blocks if 0 available):
-inflightLimit.acquire();              // throws InterruptedException
-inflightLimit.acquireUninterruptibly(); // ignores interrupts — prefer in virtual threads
-
-// Release permit when done:
-inflightLimit.release();
-
-// Always use try/finally to ensure release:
-inflightLimit.acquireUninterruptibly();
-try {
-    doWork();
-} finally {
-    inflightLimit.release(); // executes even if doWork() throws
-}
-
-// Non-blocking attempt:
-if (inflightLimit.tryAcquire()) {
-    try { doWork(); } finally { inflightLimit.release(); }
-} else {
-    // backpressure: skip or queue
-}
+Semaphore inflight = new Semaphore(32);
+inflight.acquireUninterruptibly();
+try { transfer(); } finally { inflight.release(); }
 ```
 
----
-
-### AtomicInteger & AtomicReference
-
-Lock-free, thread-safe primitives for single values.
+### `AtomicInteger` and `AtomicReference`
 
 ```java
-// AtomicInteger:
-AtomicInteger count = new AtomicInteger(0);
-count.incrementAndGet();    // ++ atomically
-count.decrementAndGet();    // --
-count.addAndGet(5);         // += 5
-count.compareAndSet(3, 10); // if == 3, set to 10; returns boolean
+int n = failures.incrementAndGet();             // lock-free
 
-// AtomicReference for BitSet (copy-on-write pattern):
-AtomicReference<BitSet> ref = new AtomicReference<>(new BitSet(100));
-
-void addChunk(int index) {
-    BitSet current, updated;
-    do {
-        current = ref.get();
-        updated = (BitSet) current.clone();
-        updated.set(index);
-    } while (!ref.compareAndSet(current, updated)); // retry if someone else updated first
-}
+// Copy-on-write BitSet (an alternative to synchronized, see §20.2):
+AtomicReference<BitSet> ref = new AtomicReference<>(new BitSet());
+ref.updateAndGet(current -> { BitSet next = (BitSet) current.clone(); next.set(i); return next; });
 ```
 
----
-
-### BitSet
-
-Compact bit vector. `BitSet.get(i)` returns true if bit i is set. Serializable to `byte[]` for wire transmission.
+### `BitSet`
 
 ```java
-BitSet bs = new BitSet(100); // 100-bit set, initially all false
-
-bs.set(3);        // set bit 3 true
-bs.clear(3);      // set bit 3 false
-bs.get(3);        // read bit 3
-bs.cardinality(); // count of true bits
-bs.length();      // index of highest set bit + 1
-
-// Serialize to wire:
-byte[] bytes = bs.toByteArray();
-
-// Deserialize from wire:
-BitSet restored = BitSet.valueOf(bytes);
-
-// Iteration over set bits:
-for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetBit(i + 1)) {
-    System.out.println("Chunk " + i + " held");
-}
-
-// Stream of set bit indices (Java 8+):
-bs.stream().forEach(i -> System.out.println("Chunk " + i));
-
-// Set difference: which chunks do I still need?
-BitSet needed = (BitSet) allChunks.clone();
-needed.andNot(heldChunks); // remove bits that are set in heldChunks
+BitSet held = new BitSet(totalChunks);
+held.set(3); held.get(3); held.cardinality();
+byte[] wire = held.toByteArray();                 // compact, little-endian
+BitSet back = BitSet.valueOf(wire);
+held.stream().forEach(i -> ...);                  // indices of set bits
+BitSet missing = (BitSet) all.clone(); missing.andNot(held);
 ```
 
----
-
-### Optional
-
-A container that may or may not hold a value. Eliminates `null` for "value might not exist" cases.
+### `Optional`
 
 ```java
-Optional<byte[]> result = storage.readChunk(id, offset, size);
-
-// If present, use it:
-result.ifPresent(data -> send(data));
-
-// Map (transform if present):
-result.map(data -> verifier.compute(data));
-
-// Filter:
-result.filter(data -> data.length == expectedSize);
-
-// OrElse:
-byte[] data = result.orElse(new byte[0]);
-byte[] data = result.orElseGet(() -> computeDefault()); // lazy
-
-// OrElseThrow:
-byte[] data = result.orElseThrow(() -> new IOException("Chunk not on disk"));
-
-// Pattern:
-result
-    .filter(data -> verifier.verify(data, expectedHash))
-    .ifPresent(data -> bitSet.set(index));
+storage.readChunk(id, offset, size)
+       .filter(bytes -> sha.verify(bytes, expected))
+       .ifPresent(_ -> existing.set(index));
 ```
 
----
-
-### MessageDigest (SHA-256)
+### `MessageDigest`
 
 ```java
-// Not thread-safe — use ThreadLocal or create per call:
-MessageDigest md = MessageDigest.getInstance("SHA-256");
-byte[] hash = md.digest(data); // compute hash
-
-// Convert to hex string (Java 17+):
-String hexHash = HexFormat.of().formatHex(hash);
-
-// ThreadLocal pattern (reuse across calls on same thread):
-static final ThreadLocal<MessageDigest> DIGEST = ThreadLocal.withInitial(() -> {
-    try { return MessageDigest.getInstance("SHA-256"); }
-    catch (NoSuchAlgorithmException e) { throw new RuntimeException(e); }
-});
-
-String compute(byte[] data) {
-    MessageDigest md = DIGEST.get();
-    md.reset(); // MUST reset before reuse
-    return HexFormat.of().formatHex(md.digest(data));
-}
+MessageDigest md = MessageDigest.getInstance("SHA-256"); // not thread-safe: one per call or thread
+String hex = HexFormat.of().formatHex(md.digest(data));
+boolean same = MessageDigest.isEqual(a, b);               // constant-time comparison
 ```
 
----
-
-### DataInputStream / DataOutputStream
-
-Wraps a stream to read/write primitive Java types in big-endian binary format.
+### `DataInputStream` / `DataOutputStream`
 
 ```java
-// Write:
-DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-out.writeByte(0x03);   // 1 byte
-out.writeInt(42);      // 4 bytes, big-endian
-out.writeUTF("hello"); // 2-byte length prefix + UTF-8 bytes
-out.write(byteArray);  // raw bytes
-
-// Read:
-DataInputStream in = new DataInputStream(socket.getInputStream());
-byte  type    = in.readByte();  // 1 byte
-int   length  = in.readInt();   // 4 bytes, big-endian
-String str    = in.readUTF();   // length-prefixed UTF-8
-
-// Read N raw bytes (IMPORTANT: always loop — one read() may return fewer bytes than requested):
-byte[] buf = new byte[length];
-int offset = 0;
-while (offset < length) {
-    int n = in.read(buf, offset, length - offset);
-    if (n == -1) throw new EOFException("Connection closed");
-    offset += n;
-}
+out.writeByte(0x03); out.writeInt(hash.length); out.write(hash); out.flush();
+byte type = in.readByte(); int length = in.readInt();     // big-endian
+byte[] body = in.readNBytes(length);                      // or loop on read(), see §20.1
 ```
 
----
-
-### ServerSocket & Socket
+### Sockets
 
 ```java
-// Server side:
-ServerSocket server = new ServerSocket(7070);  // bind to port
-Socket client = server.accept();               // blocks until connection arrives
-// handle client in a virtual thread
-
-// Client side:
-Socket socket = new Socket();
-socket.connect(new InetSocketAddress("192.168.1.10", 7070), 10_000); // 10s timeout
-socket.setSoTimeout(10_000); // read timeout per operation
-
-// Always use try-with-resources:
 try (Socket socket = new Socket()) {
-    socket.connect(addr, timeout);
-    // use socket
-} // auto-closed
+    socket.connect(address, 10_000);  // connect timeout
+    socket.setSoTimeout(10_000);      // read timeout
+}
+ServerSocket server = new ServerSocket(0);          // 0 = any free port
+int port = server.getLocalPort();
 ```
 
----
+`Socket.connect` refuses an *unresolved* `InetSocketAddress`; resolve with
+`new InetSocketAddress(host, port)`.
 
-### var (Local Variable Type Inference)
-
-The compiler infers the type of a local variable. Code only; cannot be used for fields or method signatures.
-
-```java
-// Instead of:
-DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-Map<PeerInfo, BitSet> peerMaps = new ConcurrentHashMap<>();
-
-// Use:
-var out      = new DataOutputStream(socket.getOutputStream());
-var peerMaps = new ConcurrentHashMap<PeerInfo, BitSet>();
-
-// Type is still static — this is NOT dynamic typing
-// var cannot be used with null, lambdas alone, or as method return type
-```
-
----
-
-### Text Blocks (Java 15+)
-
-Multi-line string literals with automatic indentation handling.
+### `var`, text blocks, switch expressions, streams
 
 ```java
+var peers = new ConcurrentHashMap<PeerInfo, BitSet>();   // still static typing
+
 String json = """
-    {
-        "fileHash": "abc123",
-        "fileName": "ubuntu.iso"
-    }
-    """;
-// Leading whitespace determined by the closing """ position
-```
+        { "fileHash": "abc" }
+        """;
 
----
-
-### Switch Expressions
-
-Expressions (return values) rather than statements. No fall-through. Exhaustiveness enforced for sealed types.
-
-```java
-// Arrow form (no fall-through):
 String label = switch (state) {
-    case MISSING    -> "⬜ Missing";
-    case SCHEDULED  -> "🔵 Scheduled";
-    case IN_FLIGHT  -> "🟡 In Flight";
-    case VERIFYING  -> "🟠 Verifying";
-    case VERIFIED   -> "🟢 Verified";
-    case WRITTEN    -> "✅ Written";
+    case MISSING -> "missing";
+    case WRITTEN -> "done";
+    default      -> "working";
 };
 
-// Yield for multi-line cases:
-int delay = switch (attempts) {
-    case 0       -> 100;
-    case 1       -> 200;
-    default      -> {
-        int ms = 100 * (1 << attempts);
-        yield Math.min(ms, 5000);
-    }
-};
-```
-
----
-
-### Stream API Essentials
-
-```java
 List<ChunkDescriptor> missing = manifest.chunks().stream()
-    .filter(desc -> !heldChunks.get(desc.id().index()))  // keep missing chunks
-    .sorted(Comparator.comparingInt(desc -> desc.id().index()))
-    .toList(); // Java 16+ — returns unmodifiable List
-
-// Map to extract a field:
-List<Integer> indices = manifest.chunks().stream()
-    .map(ChunkDescriptor::id)
-    .map(ChunkId::index)
-    .toList();
-
-// findFirst with condition:
-Optional<PeerInfo> source = peers.stream()
-    .filter(p -> pieceMaps.get(p).get(chunkIndex))
-    .findFirst();
-
-// Collect to map:
-Map<PeerInfo, CompletableFuture<BitSet>> futures = peers.stream()
-    .collect(Collectors.toMap(
-        peer -> peer,
-        peer -> connector.fetchPieceMapAsync(peer, hash)
-    ));
+        .filter(d -> !held.get(d.id().index()))
+        .toList();                                      // unmodifiable
 ```
 
 ---
 
 ## 19. Design Patterns Used
 
-### Ports & Adapters (Hexagonal Architecture)
-
-The domain (`core/`) defines `StorageProvider` and `PeerConnector` interfaces. Infrastructure (`storage/`, `networking/`) provides implementations. The domain never touches `FileChannel`, `Socket`, or any I/O class.
-
-**Why:** Enables testing core logic without real I/O. Enables swapping TCP for TLS, or file storage for S3, with zero changes to orchestration.
-
-### Strategy Pattern
-
-`StorageProvider` and `PeerConnector` are strategy interfaces. `FileChannelStorage` and `TcpPeerConnector` are strategies. `InMemoryStorage` and `FakePeerConnector` are test strategies.
-
-The orchestrator (`TransferManager`) accepts the strategy via constructor injection — it never instantiates implementations directly.
-
-```java
-// Strategy injected at construction:
-new TransferManager(manifest, peers, new FileChannelStorage(path), new TcpPeerConnector())
-// vs in test:
-new TransferManager(manifest, peers, new InMemoryStorage(), new FakePeerConnector(manifest))
-```
-
-### Template Method Pattern
-
-`ChunkDownloadPipeline` (if extracted) defines the algorithm skeleton: fetch → verify → write. Subclasses or lambdas can override individual steps.
-
-In this project, `TransferManager.downloadWithRetry()` plays the same role — fixed algorithm, variable implementations of fetch and storage via injected strategies.
-
-### Factory Pattern (Simple)
-
-`ManifestBuilder.build()` is a factory method — it constructs a `Manifest` from raw file bytes, hiding the chunking and hashing internals.
-
-### State Pattern (Enum-based)
-
-`ChunkState` is an enum. `ChunkStateTracker` transitions states atomically. The state machine logic is centralized, not scattered across the codebase.
-
-### Decorator Pattern (Retry Wrapper)
-
-`RetryPolicy` wraps any fallible operation and adds retry logic around it without modifying the original code. This is the Decorator pattern applied to behavior rather than objects.
+| Pattern | Where | Why |
+|---------|-------|-----|
+| **Ports & Adapters** | `StorageProvider`, `PeerConnector`, `HasherPort` in `core`; adapters in `storage`/`networking` | Test orchestration without I/O; swap TCP for TLS without touching it |
+| **Strategy** (constructor injection) | `TransferManager(manifest, peers, storage, connector)` | Production and test strategies plug in the same way |
+| **Template method** | `TransferManager.downloadWithRetry`: fetch → verify → write, with injected fetch and storage | One fixed algorithm, variable steps |
+| **Factory method** | `ManifestBuilder.build(path)` | Hides chunking and hashing |
+| **State machine** | `ChunkState` + `ChunkStateTracker` CAS transitions | State changes in one place, atomically |
+| **Sealed result types** | `TransferResult`, `ManifestValidator.ValidationResult` | The compiler forces callers to handle failure |
+| **Retry policy** | `RetryPolicy` wraps attempts with back-off | Retry logic separate from the operation |
+| **Circuit-breaker-style ban** | `PeerBanList` | Stop calling a peer that keeps failing verification |
+| **Mixin** | picocli `HelpOption` | `--help` on every command without inheritance |
 
 ---
 
 ## 20. Known Hard Problems & Solutions
 
-### 1. Partial Socket Reads
+### 1. Partial socket reads
 
-`socket.read(buf)` may return fewer bytes than requested. **Never assume one read = full message.**
+`read(buf)` may return fewer bytes than requested. Never assume one read is a
+whole message.
 
 ```java
-// WRONG:
-byte[] buf = new byte[expectedSize];
-in.read(buf); // might return 100 bytes when you expected 1048576
+// WRONG
+in.read(buf);                                   // may fill 100 of 1 048 576 bytes
 
-// CORRECT:
-byte[] buf = new byte[expectedSize];
-int offset = 0;
-while (offset < expectedSize) {
-    int n = in.read(buf, offset, expectedSize - offset);
-    if (n == -1) throw new EOFException();
-    offset += n;
+// RIGHT — FrameDecoder.readExactly
+while (offset < n) {
+    int read = in.read(buf, offset, n - offset);
+    if (read <= 0) throw new IOException("Stream ended before " + n + " bytes read");
+    offset += read;
 }
 ```
 
-### 2. Concurrent BitSet Mutation
+### 2. Concurrent `BitSet` mutation
 
-`BitSet` is not thread-safe. Two virtual threads calling `bs.set(i)` simultaneously can corrupt the internal `long[]`.
+`BitSet` is not thread-safe. Guard it with `synchronized (heldChunks)` — writes
+happen once per chunk and the critical section is a single bit operation. A
+copy-on-write `AtomicReference<BitSet>` is lock-free but allocates a new set per
+update; it only pays off with many concurrent readers.
 
-```java
-// WRONG:
-heldChunks.set(index); // race condition
+### 3. Torn writes (crash mid-chunk)
 
-// CORRECT option 1: synchronized block (simple):
-synchronized (heldChunks) { heldChunks.set(index); }
+If the process dies during `FileChannel.write`, the chunk on disk is partial.
+On restart `checkExistingChunks` re-hashes every range; the torn chunk fails and
+is downloaded again. No journal needed.
 
-// CORRECT option 2: AtomicReference + copy-on-write (lock-free but GC pressure):
-// See AtomicReference section above
-```
+### 4. Double-scheduling a chunk
 
-For our use case, `synchronized` is fine — writes are infrequent (once per chunk).
+`states.replace(id, MISSING, SCHEDULED)` is an atomic CAS: of any number of
+threads, exactly one wins.
 
-### 3. Torn Writes (Crash Mid-Chunk)
+### 5. Locks across blocking I/O
 
-If the process crashes after `FileChannel.write()` but before updating the BitSet, the chunk on disk is partially written — but we'll think it's missing.
-
-**Solution:** On resume, `checkExistingChunks()` re-reads and re-verifies every byte range from disk. A partially written chunk will fail SHA-256 and be re-downloaded. No metadata file needed.
-
-### 4. Double-Scheduling a Chunk
-
-Two orchestrator threads could both see chunk 7 as MISSING and both schedule it.
-
-**Solution:** `ConcurrentHashMap.replace(id, MISSING, SCHEDULED)` is an atomic CAS. Only one thread succeeds; the other gets `false` and skips the chunk.
-
-### 5. Thread Pinning with `synchronized`
-
-Virtual threads running inside `synchronized` blocks **pin** to their carrier OS thread — negating Loom's benefit. This is only an issue if you hold a synchronized lock while doing I/O.
-
-**Rule:** Never hold `synchronized` while blocking on I/O. For our BitSet write (very fast, no I/O inside), `synchronized` is fine. For any block that includes socket reads or file writes, use `ReentrantLock`:
+Never block on I/O while holding a lock — every thread waiting for the lock waits
+for the network too. Read shared state under the lock, then do the I/O outside:
 
 ```java
-private final ReentrantLock lock = new ReentrantLock();
-
-lock.lock();
-try {
-    // safe: ReentrantLock does NOT pin virtual threads
-    channel.write(buf, offset); // I/O inside lock = OK with ReentrantLock
-} finally {
-    lock.unlock();
-}
+boolean held;
+synchronized (heldChunks) { held = heldChunks.get(index); }   // tiny, no I/O
+if (!held) FrameEncoder.writeChunkResponse(out, STATUS_NOT_FOUND, new byte[0]);
 ```
 
-### 6. Last Chunk Size
+Where the guarded work *is* I/O (opening a file), use a `ReentrantLock`.
 
-File size is rarely an exact multiple of chunkSize. The last chunk is smaller.
+### 6. Last chunk size
 
-```java
-// Always compute actual chunk size:
-int actualSize = (int) Math.min(chunkSize, totalSize - offset);
-// Never assume all chunks are chunkSize bytes
-```
+The file size is rarely a multiple of `chunkSize`; the last chunk is shorter.
+Always use the descriptor's `size`, never `chunkSize`.
+
+### 7. A peer that lies
+
+A peer can serve bytes that do not match the manifest — a corrupted disk, a
+different file under the same name, or malice. Per-chunk SHA-256 catches every
+such chunk; `PeerBanList` stops asking that peer after 3; the whole-file hash
+catches anything that slipped past storage.
+
+### 8. Ports in tests
+
+A just-closed ephemeral port can be bound again by another test running in
+parallel, so "connect to the port I just released" is a flaky way to model a dead
+peer. Bind to port `0` and read the real port; model dead peers with a port
+nothing listens on.
 
 ---
 
 ## 21. Learning Curriculum Map
 
-| Phase | Topic | Books from Your Curriculum | Key Chapter/Section |
+| Phase | Topic | Book | Chapter / section |
 |---|---|---|---|
-| 1 | Domain modeling, Records, TDD | *Effective Java* (#12), *TDD by Example* (#28) | Items 15–17 (minimize mutability), Part I (TDD cycle) |
-| 1 | Clean architecture | *Clean Architecture* (#25) | Chapters 5–7 (SOLID), Chapter 22 (Clean Architecture) |
-| 2 | FileChannel, NIO, MappedByteBuffer | *Modern Java in Action* (#11) | Chapter 12 (NIO), *OSTEP* (#4) I/O devices chapter |
-| 2 | File descriptors, preallocation | *Operating Systems: 3 Easy Pieces* (#4) | Chapter 39 (Files and Directories) |
-| 3 | TCP, sockets, framing | *Computer Networking: Top-Down* (#9) | Chapter 3 (Transport Layer), Section 3.5 (TCP) |
-| 3 | Binary serialization, byte order | *Computer Networking: Top-Down* (#9) | Chapter 2 (Application Layer protocols) |
-| 4 | Concurrency, Semaphore, locks | *Java Concurrency in Practice* (#17) | Chapters 3–5 (thread safety, sharing, building blocks) |
-| 4 | Virtual Threads (Project Loom) | *Modern Java in Action* (#11) + JEP 444 | Chapter 15 (CompletableFuture), JEP 444 directly |
-| 5–6 | Distributed orchestration | *Understanding Distributed Systems* (#39) | Chapters 5–8 (networking), 12–14 (replication/fault tolerance) |
-| 5–6 | Failure recovery, retry, timeouts | *Understanding Distributed Systems* (#39) | Chapter 9 (coordination), Chapter 11 (failures) |
+| 1 | Domain modelling, records, TDD | *Effective Java*, *TDD by Example* | Items 15–17 (minimise mutability); Part I (TDD cycle) |
+| 1 | Clean architecture | *Clean Architecture* | Ch. 5–7 (SOLID), Ch. 22 (The Clean Architecture) |
+| 2 | `FileChannel`, NIO | *Modern Java in Action* | Ch. 12 (NIO) |
+| 2 | File descriptors, pre-allocation | *Operating Systems: Three Easy Pieces* | Ch. 39 (Files and Directories) |
+| 3 | TCP, sockets, framing | *Computer Networking: A Top-Down Approach* | Ch. 3 (Transport Layer), §3.5 (TCP) |
+| 3 | Binary serialization, byte order | *Computer Networking: A Top-Down Approach* | Ch. 2 (Application Layer) |
+| 4 | Concurrency, semaphores, locks | *Java Concurrency in Practice* | Ch. 3–5 |
+| 4 | Virtual threads | *Modern Java in Action* + JEP 444, JEP 491 | Ch. 15 (CompletableFuture) |
+| 5–6 | Distributed orchestration | *Understanding Distributed Systems* | Ch. 5–8, 12–14 |
+| 5–6 | Failure recovery, retries, timeouts | *Understanding Distributed Systems* | Ch. 9, 11 |
 
 ---
 
-*Document version: 1.0 — Complete Phase 1–6 Design*
-*Project: swarm-share-lite | Language: Java 25 | Author: Ahmed Mohammed Ali*
+*Document version 2.0 — reflects swarm-share-lite v1.0.0 · Author: Ahmed Mohammed Ali*

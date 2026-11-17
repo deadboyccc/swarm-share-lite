@@ -1,202 +1,144 @@
-Collaboration Guidelines
+# Contributing to swarm-share-lite
 
-Thank you for contributing to swarm-share-lite.
+Thank you for helping. This project is a distributed file-sharing tool **and** a
+reference implementation of modern Java 25, test-driven development and clean
+architecture — code is read as often as it is run, so how a change is made matters
+as much as what it does.
 
-The primary goal of this project is not only to build a distributed file-sharing system, but also to serve as a reference implementation of modern Java 25, Test-Driven Development (TDD), and clean software architecture.
+## Contents
 
----
+- [Getting started](#getting-started)
+- [Workflow](#workflow)
+- [Test-driven development](#test-driven-development)
+- [Architecture rules](#architecture-rules)
+- [Modern Java standards](#modern-java-standards)
+- [Documentation and comments](#documentation-and-comments)
+- [Code style](#code-style)
+- [Pull request checklist](#pull-request-checklist)
 
-Core Principles
+## Getting started
 
-1. Test First
-2. Modern Java 25
-3. Readable Code Over Clever Code
-4. Document Important Decisions
-5. Maintain Architectural Boundaries
+| You need | For |
+|----------|-----|
+| Java 25 | Building and running (the Gradle wrapper downloads Gradle) |
+| Docker | The multi-host `LanSwarmTest` (skipped without Docker; CI always has it) |
+| GraalVM 25 with `native-image` | Only to build or test the native executable |
 
-If a contribution violates these principles, it will likely be rejected regardless of whether it works.
+```bash
+./gradlew build                     # compile, unit + integration + e2e tests, coverage
+./gradlew :cli:installDist          # run it: cli/build/install/swarm-share/bin/swarm-share
+./gradlew jacocoAggregatedReport    # coverage → build/reports/jacoco/jacocoAggregatedReport/
+./gradlew :cli:nativeE2eTest        # native build + e2e suite against it (needs GraalVM)
+```
 
----
+Read [ARCHITECTURE.md](ARCHITECTURE.md) first — it is the specification. Where it
+is silent, check [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md) before inventing behaviour.
 
-Test-Driven Development (Required)
+## Workflow
 
-All new features and bug fixes should follow TDD:
+1. **Understand the problem** and find the section of `ARCHITECTURE.md` it touches.
+2. **Write a failing test** that shows the behaviour or reproduces the bug.
+3. **Implement the minimum** to make it pass.
+4. **Refactor** with the tests green.
+5. **Run `./gradlew build`** — every test must pass.
+6. **Update the docs** if behaviour, the CLI or the protocol changed.
 
-1. Write a failing test.
-2. Implement the minimum code necessary to pass.
-3. Refactor while keeping tests green.
+> **RED → GREEN → REFACTOR.** Pull requests without tests for new behaviour will be
+> asked for them.
 
-Expected workflow:
+## Test-driven development
 
-RED → GREEN → REFACTOR
+Choose the lowest layer that can show the behaviour:
 
-Contributors should submit tests alongside production code.
+| Layer | Location | Use it for |
+|-------|----------|-----------|
+| Unit | `<module>/src/test` | Domain rules, orchestration logic, protocol encoding — with fakes |
+| Integration | `networking/src/test` | Real sockets and files working together |
+| End-to-end | `cli/src/e2eTest` | User-visible flows of the packaged CLI, as separate processes |
 
-Examples:
+Guidelines:
 
-- New protocol message → tests first
-- New storage behavior → tests first
-- Bug fix → reproduce bug with a failing test before fixing
+- **Fakes over mocks.** Use `InMemoryStorage`, `FakePeerConnector` or a scripted
+  socket peer. Build real records instead of mocking them. The project has no
+  mocking library.
+- **Every test asserts something.** "Does not throw" is spelled
+  `assertThatCode(...).doesNotThrowAnyException()`.
+- **No sleeps for synchronisation.** Wait for a condition (a bound port, a log line).
+- **No borrowed ports.** Bind to port `0` and read the real port. A dead peer is
+  `127.0.0.1:1`, never a port you just released — a parallel test may take it.
+- **Names describe behaviour:** `start_corruptPeerIsBannedAfterThreeChecksumFailures_…`.
 
-Pull requests without adequate tests may be rejected.
+Examples of what needs a test first: a new protocol message, a new storage
+behaviour, a new CLI option, and every bug fix (reproduce it, then fix it).
 
----
+## Architecture rules
 
-Modern Java 25 Standards
+Dependencies flow inward only:
 
-This project intentionally embraces modern Java.
+```
+cli ──► transfer ──► manifest ──► core
+ └──► networking, storage ──────► core
+```
 
-Prefer:
+- `core` must not depend on TCP, `FileChannel`, JSON libraries, CLI frameworks or
+  any other infrastructure.
+- Infrastructure implements the ports in `core`; it is never called directly by the domain.
+- New frameworks or libraries need agreement first.
 
-- Records
-- Sealed interfaces/classes
-- Virtual Threads
-- Pattern Matching
-- Switch Expressions
-- Immutable data structures
-- Structured concurrency when appropriate
-- "Optional" where it improves clarity
+## Modern Java standards
 
-Avoid:
+Prefer: records · sealed interfaces · pattern matching and record patterns ·
+switch expressions · virtual threads · immutable collections · `Optional` where it
+clarifies.
 
-- Legacy Java patterns when modern alternatives exist
-- Unnecessary inheritance
-- Mutable shared state
-- Excessive framework usage
-- Premature optimization
+Avoid: legacy patterns with modern replacements · mutable shared state ·
+unnecessary inheritance · heavy frameworks · premature optimisation.
 
-Code should feel like modern Java, not Java 8.
+Concurrency: never hold a lock across blocking I/O (see `ARCHITECTURE.md` §20.5).
+Prefer `ConcurrentHashMap`, atomics, `Semaphore` and `ReentrantLock`.
 
----
+## Documentation and comments
 
-Documentation Requirements
+Document public classes and methods, ports, protocol behaviour, concurrency
+assumptions and non-obvious decisions:
 
-Public APIs must be documented.
-
-Example:
-
+```java
 /**
- * Retrieves a chunk from local storage.
+ * Reads {@code size} bytes from absolute byte {@code offset}.
  *
- * @param chunkIndex index of the requested chunk
- * @return chunk data
- * @throws ChunkNotFoundException if the chunk is unavailable
+ * @return the chunk bytes, or {@link Optional#empty()} if the file is shorter than expected
+ * @throws IllegalStateException if this storage has been closed
  */
-Chunk readChunk(int chunkIndex);
+Optional<byte[]> readChunk(ChunkId id, long offset, int size);
+```
 
-Document:
+Comments explain **why**, not **what**:
 
-- Public classes
-- Public methods
-- Interfaces
-- Complex algorithms
-- Protocol behaviors
-- Non-obvious design decisions
+```java
+// Bad
+counter++; // increment counter
 
-Do not document the obvious.
+// Good
+// CAS: only one virtual thread may move a chunk from MISSING to SCHEDULED.
+states.replace(id, ChunkState.MISSING, ChunkState.SCHEDULED);
+```
 
-Bad:
+## Code style
 
-// Increment counter
-counter++;
+- Small methods and classes with clear domain names.
+- Constructor injection; immutable objects.
+- Composition over inheritance; no god classes or utility dumping grounds.
+- Readability over cleverness.
 
-Good:
+## Pull request checklist
 
-// CAS loop prevents duplicate scheduling when multiple
-// virtual threads compete for the same chunk.
+- [ ] `./gradlew build` passes locally.
+- [ ] New behaviour has tests; bug fixes have a test that failed before the fix.
+- [ ] Public APIs are documented.
+- [ ] Architectural boundaries are respected.
+- [ ] `ARCHITECTURE.md`, `README.md` or `docs/ASSUMPTIONS.md` updated if behaviour changed.
+- [ ] No unrelated changes; the history is reasonably clean.
 
----
+Small, focused pull requests are reviewed fastest.
 
-Commenting Guidelines
-
-Comments should explain:
-
-- Why something exists
-- Design trade-offs
-- Concurrency assumptions
-- Protocol guarantees
-- Performance considerations
-
-Comments should not explain what the code already clearly states.
-
-Prefer self-documenting code.
-
----
-
-Architectural Rules
-
-Domain code must remain independent of infrastructure.
-
-Allowed dependency direction:
-
-CLI
- ↓
-Transfer
- ↓
-Networking / Storage
- ↓
-Operating System
-
-Core domain models must not depend on:
-
-- TCP
-- FileChannel
-- JSON libraries
-- CLI frameworks
-- External infrastructure
-
-Infrastructure depends on the domain.
-
-Never the reverse.
-
----
-
-Pull Request Expectations
-
-Before opening a PR:
-
-- All tests pass
-- New functionality includes tests
-- Public APIs are documented
-- Code follows Java 25 conventions
-- No unrelated changes included
-- Commit history is reasonably clean
-
-Small focused PRs are preferred over large PRs.
-
----
-
-Code Style
-
-Prefer:
-
-- Small methods
-- Clear names
-- Immutable objects
-- Constructor injection
-- Explicit domain terminology
-
-Avoid:
-
-- God classes
-- Utility dumping grounds
-- Deep inheritance hierarchies
-- Excessive abstraction
-- Over-engineering
-
----
-
-Project Goal
-
-The objective is to create a codebase that is:
-
-- Educational
-- Maintainable
-- Extensible
-- Idiomatic Modern Java
-
-Future contributors should be able to learn distributed systems and modern Java simply by reading the code.
-
-When in doubt:
-
-Choose readability, tests, and simplicity.
+> When in doubt, choose readability, tests and simplicity.

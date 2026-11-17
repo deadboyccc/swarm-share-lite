@@ -1,243 +1,122 @@
-# AGENTS.md
+# AGENTS.md — Guidelines for AI Coding Agents
 
-# AI Agent Guidelines
+These rules apply to every AI agent (Claude, ChatGPT, Copilot, Cursor, Cline,
+Windsurf, …) contributing to **swarm-share-lite**. Human contributors follow
+[CONTRIBUTING.md](CONTRIBUTING.md); this file adds what an agent needs to work
+safely and in step with the project.
 
-This document defines the engineering standards AI coding agents
-(ChatGPT, Claude, GitHub Copilot, Cursor, Cline, Windsurf, etc.) must
-follow when contributing to **swarm-share-lite**.
+The goal is not code that merely works. It is software that is correct, readable,
+tested and true to its architecture — a reference implementation of modern
+Java 25, TDD, hexagonal architecture and distributed-systems practice.
 
-This project is intentionally designed as a production-quality reference
-implementation of:
+## 1. Sources of truth
 
--   Modern Java 25
--   Test-Driven Development (TDD)
--   Hexagonal (Ports & Adapters) Architecture
--   Distributed Systems
--   Production-grade engineering practices
+| Question | Answer lives in |
+|----------|-----------------|
+| What should the system do? | [ARCHITECTURE.md](ARCHITECTURE.md) — the specification |
+| What was decided where the spec is silent? | [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md) |
+| How do I build, test and contribute? | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
-The goal is not simply to make the code work---it is to build software
-that is educational, maintainable, extensible, and idiomatic.
+- If code contradicts the spec, fix the code, not the spec.
+- If the spec is ambiguous or silent, do not invent behaviour: take the most
+  conservative reading and record it in `docs/ASSUMPTIONS.md`.
+- Implement only what was asked. No unrequested features, refactors or dependencies.
 
-------------------------------------------------------------------------
+## 2. Required workflow
 
-# Primary Objective
+1. Read the relevant spec section and the surrounding code.
+2. Design the API.
+3. Write a failing test.
+4. Implement the minimum to pass it.
+5. Refactor with the tests green.
+6. Run `./gradlew build` and confirm every test passes.
+7. Update the documentation if behaviour changed.
 
-Every contribution should improve one or more of the following:
+**RED → GREEN → REFACTOR.** Do not write production code before its test unless
+explicitly told to.
 
--   Correctness
--   Readability
--   Testability
--   Maintainability
--   Architectural consistency
--   Documentation quality
+## 3. Verify by running, not by assuming
 
-Never optimize for producing more code.
+| To check | Run |
+|----------|-----|
+| Everything on the JVM | `./gradlew build` |
+| Coverage | `./gradlew jacocoAggregatedReport` |
+| The native executable | `./gradlew :cli:nativeE2eTest` (needs GraalVM 25, ~1.5 GB free memory) |
+| A user flow by hand | `./gradlew :cli:installDist`, then `cli/build/install/swarm-share/bin/swarm-share` |
 
-Optimize for producing better software.
+- Never report a task as done until the relevant command has passed.
+- Never skip, disable or weaken a test to make it pass. Fix the cause.
+- A flaky test is a bug: make it deterministic (see §7) rather than retrying it.
 
-------------------------------------------------------------------------
+## 4. Architecture rules
 
-# Core Principles
-
-Every change must follow these principles:
-
-1.  Test First
-2.  Modern Java 25
-3.  Clean Architecture
-4.  Simplicity
-5.  Readability
-6.  Small Focused Changes
-7.  Extensive Documentation
-8.  Production-quality Engineering
-
-If a request conflicts with these principles, prefer the principles.
-
-------------------------------------------------------------------------
-
-# Required Development Workflow
-
-1.  Understand the problem.
-2.  Design the API.
-3.  Write failing tests.
-4.  Implement the minimum solution.
-5.  Refactor.
-6.  Verify all tests pass.
-7.  Improve documentation if needed.
-
-**Always:** RED → GREEN → REFACTOR
-
-Never generate production code before tests unless explicitly
-instructed.
-
-------------------------------------------------------------------------
-
-# Architecture Rules
-
-Dependencies always flow inward.
-
-``` text
-CLI
- ↓
-Transfer
- ↓
-Networking / Storage
- ↓
-Operating System
+```
+cli ──► transfer ──► manifest ──► core
+ └──► networking, storage ──────► core
 ```
 
-Infrastructure depends on the domain.
+- Dependencies flow inward. Infrastructure depends on the domain, never the reverse.
+- `core` stays free of networking, storage, serialization, CLI frameworks and
+  external services.
+- New behaviour in the domain goes behind a port; new infrastructure implements one.
+- Never introduce a framework or library without approval.
 
-Never the reverse.
+## 5. Java 25 guidelines
 
-The domain must remain independent of networking, storage,
-serialization, CLI frameworks, databases, and external services.
+| Prefer | Avoid |
+|--------|-------|
+| Records, sealed interfaces, pattern matching, switch expressions | Legacy patterns with a modern replacement |
+| Virtual threads, immutable collections | Mutable shared state |
+| `ConcurrentHashMap`, atomics, `Semaphore`, `ReentrantLock` | Locks held across blocking I/O |
+| `Optional` where it improves clarity | Boilerplate, deep inheritance, over-engineering |
 
-------------------------------------------------------------------------
+## 6. Testing standards
 
-# Java 25 Guidelines
+- JUnit Jupiter 6 and AssertJ.
+- **Fakes over mocks** — `InMemoryStorage`, `FakePeerConnector`, scripted socket
+  peers, real records. Do not add a mocking library.
+- Unit tests for logic, integration tests for real sockets and files, end-to-end
+  tests (`cli/src/e2eTest`) for user flows; the e2e suite must keep passing
+  against both the JVM distribution and the native binary.
+- Every test asserts something meaningful.
 
-Prefer:
+## 7. Determinism rules for tests
 
--   Records
--   Sealed interfaces/classes
--   Pattern matching
--   Switch expressions
--   Virtual Threads
--   Immutable collections
--   Structured concurrency when appropriate
--   Optional where it improves clarity
+- Bind servers to port `0` and read the real port; never reuse a released port.
+- Model a dead peer as `127.0.0.1:1`.
+- Wait for a condition (bound port, log line, process exit) — never `sleep` to synchronise.
+- Bound every potentially blocking test with `@Timeout`.
 
-Avoid:
+## 8. Native image
 
--   Legacy Java patterns
--   Mutable shared state
--   Excessive inheritance
--   Boilerplate
--   Over-engineering
+The CLI ships as a GraalVM native executable. When adding a class that is reached
+reflectively (picocli commands, Jackson DTOs):
 
-------------------------------------------------------------------------
+- picocli commands get metadata from `picocli-codegen` automatically;
+- Jackson DTOs need an entry in the owning module's
+  `src/main/resources/META-INF/native-image/<group>/<module>/reachability-metadata.json`;
+- prove it with `./gradlew :cli:nativeE2eTest`.
 
-# Testing Standards
+## 9. Documentation
 
-Every production change must include tests.
+Document public APIs, ports, protocol guarantees, concurrency assumptions and
+architectural decisions. Explain **why**, not **what**. Keep `README.md`,
+`ARCHITECTURE.md` and `docs/ASSUMPTIONS.md` true to the code you leave behind.
 
-Prefer:
+## 10. Error handling
 
--   JUnit 5
--   AssertJ
--   Fake implementations over mocks
--   Integration tests where appropriate
+- Fail fast; never swallow an exception silently.
+- Preserve root causes when wrapping.
+- User-facing failures are one clear line (`<command> failed: <reason>`), not a stack trace.
 
-Follow TDD.
+## 11. Definition of done
 
-------------------------------------------------------------------------
+- [ ] Tests exist and pass (`./gradlew build`)
+- [ ] Native e2e still passes if CLI, reflection or serialization changed
+- [ ] Architecture respected
+- [ ] Public APIs documented
+- [ ] Docs updated where behaviour changed
+- [ ] No dead code, no unrelated changes
 
-# Documentation
-
-Document public APIs, concurrency assumptions, protocol guarantees,
-complex algorithms, and architectural decisions.
-
-Explain **why**, not **what**.
-
-------------------------------------------------------------------------
-
-# Code Style
-
-Prefer:
-
--   Small methods
--   Small classes
--   Constructor injection
--   Immutable objects
--   Clear domain terminology
--   Composition over inheritance
-
-Avoid:
-
--   God classes
--   Utility dumping grounds
--   Deep inheritance
--   Clever code
-
-------------------------------------------------------------------------
-
-# Concurrency
-
-Prefer Virtual Threads, ConcurrentHashMap, Atomic types, Semaphore, and
-structured concurrency.
-
-Avoid unnecessary synchronization and shared mutable state.
-
-------------------------------------------------------------------------
-
-# Error Handling
-
-Fail fast.
-
-Never silently swallow exceptions.
-
-Preserve root causes.
-
-------------------------------------------------------------------------
-
-# Performance
-
-Correctness \> Simplicity \> Readability \> Optimization.
-
-Only optimize with a documented reason.
-
-------------------------------------------------------------------------
-
-# Pull Requests
-
-Before considering work complete:
-
--   All tests pass
--   New functionality is tested
--   Public APIs are documented
--   Java 25 conventions are followed
--   Architectural boundaries are respected
--   No dead code
--   No unrelated changes
-
-------------------------------------------------------------------------
-
-# AI Agent Expectations
-
-Before writing code:
-
--   Read surrounding code.
--   Preserve existing architecture.
--   Reuse abstractions.
--   Avoid duplication.
--   Never introduce frameworks without approval.
--   Never bypass architectural boundaries.
-
-------------------------------------------------------------------------
-
-# Definition of Done
-
--   ✅ Tests exist
--   ✅ Tests pass
--   ✅ Architecture respected
--   ✅ Public APIs documented
--   ✅ Naming is clear
--   ✅ Complexity minimized
--   ✅ Production quality
-
-------------------------------------------------------------------------
-
-# Project Philosophy
-
-Every class should teach.
-
-Every API should communicate intent.
-
-Every test should explain behavior.
-
-Every abstraction should have a purpose.
-
-When in doubt:
-
-> Choose readability over cleverness, tests over assumptions,
-> architecture over shortcuts, and simplicity over complexity.
+> Choose readability over cleverness, tests over assumptions, architecture over
+> shortcuts, and simplicity over complexity.

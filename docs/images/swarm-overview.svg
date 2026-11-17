@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img" aria-labelledby="title desc">
+  <title id="title">How swarm-share-lite moves a file</title>
+  <desc id="desc">A seeder splits a file into SHA-256 verified chunks and publishes a manifest. Leechers fetch piece maps, download missing chunks in parallel over TCP, verify each chunk, write it at its offset, and ban peers that serve corrupt data.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+    <style>
+      text { font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #0f172a; }
+      .title { font-size: 15px; font-weight: 700; }
+      .mono { font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace; font-size: 11.5px; fill: #334155; }
+      .key { font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace; font-size: 11.5px; fill: #1d4ed8; }
+      .small { font-size: 11.5px; fill: #475569; }
+      .label { font-size: 12px; fill: #334155; font-weight: 600; }
+      .pill { font-size: 11.5px; fill: #0f172a; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.2; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="959" height="429" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+
+  <!-- Seeder -->
+  <rect class="card" x="24" y="24" width="276" height="250" rx="12"/>
+  <text class="title" x="42" y="52">Seeder</text>
+  <text class="mono" x="42" y="74">seed --file ubuntu.iso</text>
+  <rect x="42" y="90" width="38" height="26" rx="4" fill="#3b82f6"/>
+  <rect x="82" y="90" width="38" height="26" rx="4" fill="#3b82f6"/>
+  <rect x="122" y="90" width="38" height="26" rx="4" fill="#3b82f6"/>
+  <rect x="162" y="90" width="38" height="26" rx="4" fill="#3b82f6"/>
+  <rect x="202" y="90" width="38" height="26" rx="4" fill="#3b82f6"/>
+  <rect x="242" y="90" width="22" height="26" rx="4" fill="#3b82f6"/>
+  <text class="small" x="42" y="134">fixed-size chunks · last one shorter</text>
+  <rect x="42" y="148" width="240" height="108" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text class="label" x="56" y="170">ubuntu.iso.manifest.json</text>
+  <text class="key" x="56" y="192">fileHash</text><text class="mono" x="136" y="192">SHA-256 of file</text>
+  <text class="key" x="56" y="210">chunkSize</text><text class="mono" x="136" y="210">1 MiB</text>
+  <text class="key" x="56" y="228">chunks[]</text><text class="mono" x="136" y="228">offset · size</text>
+  <text class="mono" x="136" y="246">· sha256</text>
+
+  <!-- Leecher A -->
+  <rect class="card" x="660" y="24" width="276" height="118" rx="12"/>
+  <text class="title" x="678" y="52">Leecher A</text>
+  <text class="mono" x="678" y="72">leech --peer seeder:7070</text>
+  <rect x="678" y="84" width="38" height="24" rx="4" fill="#22c55e"/>
+  <rect x="718" y="84" width="38" height="24" rx="4" fill="#22c55e"/>
+  <rect x="758" y="84" width="38" height="24" rx="4" fill="#22c55e"/>
+  <rect x="798" y="84" width="38" height="24" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-dasharray="4 3"/>
+  <rect x="838" y="84" width="38" height="24" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-dasharray="4 3"/>
+  <rect x="878" y="84" width="22" height="24" rx="4" fill="#e2e8f0"/>
+  <text class="small" x="678" y="128">verified · in flight · missing</text>
+
+  <!-- Leecher B -->
+  <rect class="card" x="660" y="156" width="276" height="118" rx="12"/>
+  <text class="title" x="678" y="184">Leecher B</text>
+  <text class="mono" x="678" y="204">leech --peer bad:7070 seeder:7070</text>
+  <rect x="678" y="216" width="38" height="24" rx="4" fill="#22c55e"/>
+  <rect x="718" y="216" width="38" height="24" rx="4" fill="#22c55e"/>
+  <rect x="758" y="216" width="38" height="24" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-dasharray="4 3"/>
+  <rect x="798" y="216" width="38" height="24" rx="4" fill="#e2e8f0"/>
+  <rect x="838" y="216" width="38" height="24" rx="4" fill="#e2e8f0"/>
+  <rect x="878" y="216" width="22" height="24" rx="4" fill="#e2e8f0"/>
+  <text class="small" x="678" y="260">resumed: 2 chunks were already on disk</text>
+
+  <!-- Seeder to leechers -->
+  <text class="label" x="340" y="62">① piece map: which chunks the peer holds</text>
+  <text class="label" x="340" y="80">② chunk requests, one TCP connection each</text>
+  <path d="M300 98 C 460 98, 500 96, 656 96" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="340" y="128">each chunk is checked against its manifest</text>
+  <text class="small" x="340" y="144">hash before it is written to disk</text>
+  <path d="M300 168 C 460 168, 500 178, 656 178" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Corrupt peer -->
+  <rect x="352" y="206" width="236" height="60" rx="10" fill="#fef2f2" stroke="#fca5a5"/>
+  <text class="label" x="368" y="230" style="fill:#b91c1c">Corrupt peer · bad:7070</text>
+  <text class="small" x="368" y="250">banned after 3 chunks fail SHA-256</text>
+  <path d="M588 240 L 656 240" fill="none" stroke="#dc2626" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow-red)"/>
+  <path d="M612 232 L 628 248 M628 232 L 612 248" stroke="#dc2626" stroke-width="2.2"/>
+
+  <!-- Pipeline -->
+  <text class="label" x="24" y="306">Download pipeline (TransferManager)</text>
+  <rect x="24" y="318" width="120" height="38" rx="19" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="pill" x="84" y="341" text-anchor="middle">Check manifest</text>
+  <rect x="156" y="318" width="120" height="38" rx="19" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="pill" x="216" y="341" text-anchor="middle">Resume from disk</text>
+  <rect x="288" y="318" width="120" height="38" rx="19" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="pill" x="348" y="341" text-anchor="middle">Get piece maps</text>
+  <rect x="420" y="318" width="120" height="38" rx="19" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="pill" x="480" y="341" text-anchor="middle">Parallel fetch</text>
+  <rect x="552" y="318" width="120" height="38" rx="19" fill="#dcfce7" stroke="#86efac"/>
+  <text class="pill" x="612" y="341" text-anchor="middle">Verify SHA-256</text>
+  <rect x="684" y="318" width="120" height="38" rx="19" fill="#dcfce7" stroke="#86efac"/>
+  <text class="pill" x="744" y="341" text-anchor="middle">Write at offset</text>
+  <rect x="816" y="318" width="120" height="38" rx="19" fill="#dcfce7" stroke="#86efac"/>
+  <text class="pill" x="876" y="341" text-anchor="middle">Whole-file hash</text>
+  <g stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)">
+    <path d="M144 337 L 154 337"/>
+    <path d="M276 337 L 286 337"/>
+    <path d="M408 337 L 418 337"/>
+    <path d="M540 337 L 550 337"/>
+    <path d="M672 337 L 682 337"/>
+    <path d="M804 337 L 814 337"/>
+  </g>
+  <text class="small" x="24" y="386">One virtual thread per missing chunk, at most 32 transfers in flight. A failed chunk is retried with exponential backoff on the next peer that has it.</text>
+  <text class="small" x="24" y="406">A torn or corrupt chunk on disk fails its hash on restart and is downloaded again — the file is its own recovery log.</text>
+</svg>
