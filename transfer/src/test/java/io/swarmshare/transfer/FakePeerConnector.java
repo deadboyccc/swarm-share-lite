@@ -101,6 +101,14 @@ final class FakePeerConnector implements PeerConnector {
         return count == null ? 0 : count.get();
     }
 
+    int fetchesFrom(PeerInfo peer) {
+        String prefix = peer.id() + "#";
+        return fetchCounts.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(prefix))
+                .mapToInt(e -> e.getValue().get())
+                .sum();
+    }
+
     int totalFetches() {
         return fetchCounts.values().stream().mapToInt(AtomicInteger::get).sum();
     }

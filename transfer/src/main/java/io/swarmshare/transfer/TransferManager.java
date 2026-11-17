@@ -19,10 +19,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.stream.Collectors;
 
 /**
  * Central orchestrator for the swarm download pipeline:
  * resume → collect piece maps → parallel download → verify → persist.
+ *
+ * <p>
+ * Resilience (roadmap phase 6): each chunk is retried with exponential backoff,
+ * moving to another peer that advertises it after a failure; peers that keep
+ * serving data which fails verification are banned for the rest of the transfer
+ * (see {@link PeerBanList}).
  */
 public final class TransferManager {
 
@@ -45,9 +52,13 @@ public final class TransferManager {
     private final RetryPolicy retryPolicy;
     private final ChunkStateTracker stateTracker;
     /**
-     * Bounds concurrent downloads to {@link #MAX_INFLIGHT} to avoid saturating network buffers.
+     * Bounds concurrent downloads (default {@link #MAX_INFLIGHT}) to avoid saturating network buffers.
      */
-    private final Semaphore inflightLimit = new Semaphore(MAX_INFLIGHT);
+    private final Semaphore inflightLimit;
+    /**
+     * Peers banned for serving corrupt chunks during this transfer.
+     */
+    private final PeerBanList banList;
     /**
      * Bitmap of chunk indices already verified and written to disk.
      */
@@ -74,12 +85,28 @@ public final class TransferManager {
     TransferManager(Manifest manifest, List<PeerInfo> peers,
                     StorageProvider storage, PeerConnector connector,
                     HasherPort verifier, RetryPolicy retryPolicy) {
+        this(manifest, peers, storage, connector, verifier, retryPolicy, MAX_INFLIGHT, new PeerBanList());
+    }
+
+    /**
+     * Test seam: a small in-flight limit makes download order observable, and an
+     * injected {@link PeerBanList} lets tests inspect bans.
+     */
+    TransferManager(Manifest manifest, List<PeerInfo> peers,
+                    StorageProvider storage, PeerConnector connector,
+                    HasherPort verifier, RetryPolicy retryPolicy,
+                    int maxInflight, PeerBanList banList) {
+        if (maxInflight < 1) {
+            throw new IllegalArgumentException("maxInflight must be >= 1, got: " + maxInflight);
+        }
         this.manifest = manifest;
         this.peers = List.copyOf(peers);
         this.storage = storage;
         this.connector = connector;
         this.verifier = verifier;
         this.retryPolicy = retryPolicy;
+        this.inflightLimit = new Semaphore(maxInflight);
+        this.banList = banList;
         this.stateTracker = new ChunkStateTracker();
         this.heldChunks = new BitSet(manifest.totalChunks());
     }
@@ -180,6 +207,17 @@ public final class TransferManager {
             attempts++;
             inflightLimit.acquireUninterruptibly();
             try {
+                // The source was chosen when the chunk was scheduled; the peer may have
+                // been banned while this thread waited for an in-flight slot.
+                if (banList.isBanned(source)) {
+                    source = selectPeer(desc.id().index(), pieceMaps);
+                    if (source == null) {
+                        stateTracker.reset(desc.id(), ChunkState.MISSING);
+                        LOG.log(Level.ERROR, "FAILED: chunk {0}: every peer that has it is banned",
+                                desc.id().index());
+                        return;
+                    }
+                }
                 TransferResult result = fetchAndVerify(desc, source);
                 switch (result) {
                     case TransferResult.Success(_, byte[] data) -> {
@@ -247,7 +285,12 @@ public final class TransferManager {
             byte[] data = connector.fetchChunkAsync(source, desc.id(), desc.size()).join();
             stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.VERIFYING);
             if (!verifier.verify(data, desc.sha256())) {
-                return new TransferResult.Failure(desc.id(), "checksum mismatch", true);
+                if (banList.recordChecksumFailure(source)) {
+                    LOG.log(Level.WARNING, "Banned peer {0} after {1} chunks failed checksum verification",
+                            source.displayAddress(), String.valueOf(banList.checksumFailures(source)));
+                }
+                return new TransferResult.Failure(desc.id(),
+                        "checksum mismatch from " + source.displayAddress(), true);
             }
             stateTracker.transition(desc.id(), ChunkState.VERIFYING, ChunkState.VERIFIED);
             return new TransferResult.Success(desc.id(), data);
@@ -292,14 +335,14 @@ public final class TransferManager {
     }
 
     /**
-     * Naive selection: the first peer, in the order the caller configured them, whose
-     * piece map advertises the chunk. Walking {@link #peers} rather than the
+     * Naive selection: the first peer, in the order the caller configured them, that
+     * advertises the chunk and is not banned. Walking {@link #peers} rather than the
      * concurrent map keeps the choice deterministic, so a user's peer list doubles
      * as a priority list.
      */
     private PeerInfo selectPeer(int chunkIndex, Map<PeerInfo, BitSet> pieceMaps) {
         return peers.stream()
-                .filter(peer -> advertises(pieceMaps, peer, chunkIndex))
+                .filter(peer -> usable(pieceMaps, peer, chunkIndex))
                 .findFirst()
                 .orElse(null);
     }
@@ -308,14 +351,15 @@ public final class TransferManager {
                                            Map<PeerInfo, BitSet> pieceMaps) {
         return peers.stream()
                 .filter(peer -> !peer.equals(exclude))
-                .filter(peer -> advertises(pieceMaps, peer, chunkIndex))
+                .filter(peer -> usable(pieceMaps, peer, chunkIndex))
                 .findFirst()
                 .orElse(null);
     }
 
-    private static boolean advertises(Map<PeerInfo, BitSet> pieceMaps, PeerInfo peer, int chunkIndex) {
+    /** Advertises the chunk in its piece map and has not been banned. */
+    private boolean usable(Map<PeerInfo, BitSet> pieceMaps, PeerInfo peer, int chunkIndex) {
         BitSet pieceMap = pieceMaps.get(peer);
-        return pieceMap != null && pieceMap.get(chunkIndex);
+        return pieceMap != null && pieceMap.get(chunkIndex) && !banList.isBanned(peer);
     }
 
     private PeerInfo nextPeerAfterFailure(int chunkIndex, PeerInfo current,
@@ -324,7 +368,7 @@ public final class TransferManager {
         if (alternative != null) {
             return alternative;
         }
-        return advertises(pieceMaps, current, chunkIndex) ? current : null;
+        return usable(pieceMaps, current, chunkIndex) ? current : null;
     }
 
     /**
@@ -339,8 +383,11 @@ public final class TransferManager {
                     .count();
         }
         if (missing > 0) {
+            String bans = banList.banned().isEmpty() ? "" : " (banned for corrupt data: "
+                    + banList.banned().stream().map(PeerInfo::displayAddress).sorted()
+                    .collect(Collectors.joining(", ")) + ")";
             throw new IllegalStateException(
-                    "Transfer incomplete: " + missing + " of " + manifest.totalChunks() + " chunks missing");
+                    "Transfer incomplete: " + missing + " of " + manifest.totalChunks() + " chunks missing" + bans);
         }
 
         storage.flush();

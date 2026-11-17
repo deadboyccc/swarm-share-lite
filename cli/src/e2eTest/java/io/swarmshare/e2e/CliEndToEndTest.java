@@ -7,8 +7,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Random;
@@ -88,6 +91,60 @@ class CliEndToEndTest {
             assertThat(leech.exitCode()).as(leech.toString()).isZero();
         }
         assertThat(Files.readAllBytes(output)).isEqualTo(Files.readAllBytes(source));
+    }
+
+    @Test
+    void leech_bansSeederServingCorruptDataAndCompletesFromHonestOne() throws Exception {
+        Path tampered = randomFile("doc.bin", 4 * MIB); // 4 chunks
+        Path honest = Files.copy(tampered, Files.createDirectories(dir.resolve("honest")).resolve("doc.bin"));
+        Path manifest = dir.resolve("doc.manifest.json");
+        Path output = dir.resolve("doc.out");
+
+        try (SwarmCli.Running corrupt = cli.start("seed", "--file", tampered.toString(), "--port", "0",
+                     "--manifest-out", manifest.toString());
+             SwarmCli.Running good = cli.start("seed", "--file", honest.toString(), "--port", "0",
+                     "--manifest-out", dir.resolve("honest.manifest.json").toString())) {
+            int corruptPort = corrupt.awaitListeningPort(COMMAND_TIMEOUT);
+            int goodPort = good.awaitListeningPort(COMMAND_TIMEOUT);
+            // After the manifest is published, flip one byte in every chunk on disk:
+            // the first seeder now serves data that fails verification.
+            try (var channel = FileChannel.open(tampered, StandardOpenOption.WRITE)) {
+                for (long offset = 0; offset < 4L * MIB; offset += MIB) {
+                    channel.write(ByteBuffer.wrap(new byte[]{(byte) 0xFF}), offset);
+                }
+            }
+
+            SwarmCli.Result leech = cli.run(COMMAND_TIMEOUT, "leech", "--manifest", manifest.toString(),
+                    "--peer", "127.0.0.1:" + corruptPort, "127.0.0.1:" + goodPort, "--output", output.toString());
+
+            assertThat(leech.exitCode()).as(leech.toString()).isZero();
+            assertThat(leech.stderr()).contains("Banned peer 127.0.0.1:" + corruptPort
+                    + " after 3 chunks failed checksum verification");
+        }
+        assertThat(Files.readAllBytes(output)).isEqualTo(Files.readAllBytes(honest));
+    }
+
+    @Test
+    void leech_fromOnlyACorruptSeeder_failsNamingTheBannedPeer() throws Exception {
+        Path tampered = randomFile("bad.bin", 4 * MIB);
+        Path manifest = dir.resolve("bad.manifest.json");
+
+        try (SwarmCli.Running corrupt = cli.start("seed", "--file", tampered.toString(), "--port", "0",
+                "--manifest-out", manifest.toString())) {
+            int port = corrupt.awaitListeningPort(COMMAND_TIMEOUT);
+            try (var channel = FileChannel.open(tampered, StandardOpenOption.WRITE)) {
+                for (long offset = 0; offset < 4L * MIB; offset += MIB) {
+                    channel.write(ByteBuffer.wrap(new byte[]{(byte) 0xFF}), offset);
+                }
+            }
+
+            SwarmCli.Result leech = cli.run(COMMAND_TIMEOUT, "leech", "--manifest", manifest.toString(),
+                    "--peer", "127.0.0.1:" + port, "--output", dir.resolve("bad.out").toString());
+
+            assertThat(leech.exitCode()).isEqualTo(1);
+            assertThat(leech.stderr()).contains("leech failed: Transfer incomplete: 4 of 4 chunks missing",
+                    "banned for corrupt data: 127.0.0.1:" + port);
+        }
     }
 
     @Test

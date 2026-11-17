@@ -194,13 +194,100 @@ class TransferManagerTest {
     @Test
     void start_retriesExhausted_failsWithIncompleteTransfer() throws Exception {
         Fixture f = fixture(20, 10);
-        PeerInfo liar = peer();
-        f.connector().alwaysCorrupt(liar);
+        PeerInfo flaky = peer();
+        f.connector().dropsConnections(flaky);
 
-        assertThatThrownBy(() -> manager(f, List.of(liar), f.storage(), f.connector()).start())
+        assertThatThrownBy(() -> manager(f, List.of(flaky), f.storage(), f.connector()).start())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Transfer incomplete: 2 of 2 chunks missing");
-        assertThat(f.connector().fetchCount(liar, 0)).isEqualTo(3);
+        assertThat(f.connector().fetchCount(flaky, 0)).as("max attempts per chunk").isEqualTo(3);
+        assertThat(f.connector().fetchCount(flaky, 1)).isEqualTo(3);
+    }
+
+    @Test
+    void start_backsOffExponentiallyBetweenAttempts() throws Exception {
+        Fixture f = fixture(10, 10); // one chunk
+        PeerInfo flaky = peer();
+        f.connector().dropsConnections(flaky);
+        RetryPolicy backoff = new RetryPolicy(3, Duration.ofMillis(60), Duration.ofSeconds(1));
+        long started = System.nanoTime();
+
+        assertThatThrownBy(() -> new TransferManager(f.manifest(), List.of(flaky), f.storage(), f.connector(),
+                new Sha256(), backoff).start()).isInstanceOf(IllegalStateException.class);
+
+        // 3 attempts → 2 waits: 60 ms, then 120 ms
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isGreaterThanOrEqualTo(Duration.ofMillis(180));
+        assertThat(f.connector().fetchCount(flaky, 0)).isEqualTo(3);
+    }
+
+    // ── corrupt-peer detection (roadmap phase 6) ─────────────────────────────────
+
+    @Test
+    void start_corruptPeerIsBannedAfterThreeChecksumFailures_honestPeerServesTheRest() throws Exception {
+        Fixture f = fixture(100, 10); // 10 chunks
+        PeerInfo liar = peer();
+        PeerInfo honest = peer();
+        f.connector().alwaysCorrupt(liar);
+        PeerBanList bans = new PeerBanList();
+
+        sequential(f, List.of(liar, honest), bans).start();
+
+        assertStorageHoldsFile(f);
+        assertThat(bans.isBanned(liar)).isTrue();
+        assertThat(bans.isBanned(honest)).isFalse();
+        assertThat(f.connector().fetchesFrom(liar)).as("no requests after the ban").isEqualTo(3);
+    }
+
+    @Test
+    void start_soleCorruptPeer_isBannedAndTransferFailsFastNamingIt() throws Exception {
+        Fixture f = fixture(100, 10);
+        PeerInfo liar = peer();
+        f.connector().alwaysCorrupt(liar);
+        PeerBanList bans = new PeerBanList();
+
+        assertThatThrownBy(() -> sequential(f, List.of(liar), bans).start())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Transfer incomplete: 10 of 10 chunks missing")
+                .hasMessageContaining("banned for corrupt data: " + liar.displayAddress());
+        assertThat(f.connector().fetchesFrom(liar)).as("3 strikes, not 3 per chunk").isEqualTo(3);
+    }
+
+    @Test
+    void start_connectionFailures_neverBanAPeer() throws Exception {
+        Fixture f = fixture(50, 10);
+        PeerInfo flaky = peer();
+        PeerInfo solid = peer();
+        f.connector().dropsConnections(flaky);
+        PeerBanList bans = new PeerBanList();
+
+        sequential(f, List.of(flaky, solid), bans).start();
+
+        assertStorageHoldsFile(f);
+        assertThat(f.connector().fetchesFrom(flaky)).isEqualTo(5);
+        assertThat(bans.banned()).isEmpty();
+    }
+
+    @Test
+    void start_occasionalCorruption_belowThreshold_keepsThePeer() throws Exception {
+        Fixture f = fixture(50, 10);
+        PeerInfo peer = peer();
+        f.connector().corruptOnce(1).corruptOnce(3);
+        PeerBanList bans = new PeerBanList();
+
+        sequential(f, List.of(peer), bans).start();
+
+        assertStorageHoldsFile(f);
+        assertThat(bans.checksumFailures(peer)).isEqualTo(2);
+        assertThat(bans.isBanned(peer)).isFalse();
+    }
+
+    @Test
+    void constructor_rejectsNonPositiveInflightLimit() throws Exception {
+        Fixture f = fixture(10, 10);
+
+        assertThatThrownBy(() -> new TransferManager(f.manifest(), List.of(peer()), f.storage(), f.connector(),
+                new Sha256(), NO_WAIT, 0, new PeerBanList()))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -292,6 +379,11 @@ class TransferManagerTest {
     private static TransferManager manager(Fixture f, List<PeerInfo> peers, StorageProvider storage,
                                            FakePeerConnector connector) {
         return new TransferManager(f.manifest(), peers, storage, connector, new Sha256(), NO_WAIT);
+    }
+
+    /** One download at a time, so the order of failures and bans is deterministic. */
+    private static TransferManager sequential(Fixture f, List<PeerInfo> peers, PeerBanList bans) {
+        return new TransferManager(f.manifest(), peers, f.storage(), f.connector(), new Sha256(), NO_WAIT, 1, bans);
     }
 
     private static PeerInfo peer() {
