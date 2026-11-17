@@ -20,20 +20,26 @@ Built on Java 25 virtual threads: natural blocking I/O code, no thread-pool tuni
 
 ## Quick Start
 
-**Requirements:** Java 25+, Gradle 9+
+**Requirements:** Java 25+ (the Gradle wrapper downloads Gradle). For the native binary: GraalVM 25.
 
 ```bash
-./gradlew build
+./gradlew :cli:installDist            # JVM distribution -> cli/build/install/swarm-share
+CLI=cli/build/install/swarm-share/bin/swarm-share
 
-# Seed a file (writes ubuntu.iso.manifest.json, serves on port 7070)
-java -cp cli/build/classes/java/main io.swarmshare.cli.Main seed /tmp/ubuntu.iso 7070
+# Seed a file (writes ubuntu.iso.manifest.json next to it, serves on port 7070)
+$CLI seed /tmp/ubuntu.iso 7070
 
-# Download using the manifest + peer address
-java -cp cli/build/classes/java/main io.swarmshare.cli.Main download \
-    ubuntu.iso.manifest.json /tmp/ubuntu.iso 192.168.1.10:7070
+# Download using the manifest + one or more peer addresses
+$CLI download /tmp/ubuntu.iso.manifest.json ./ubuntu.iso 192.168.1.10:7070
 ```
 
 Also available: `build-manifest` (generate a manifest without seeding). Run any command with `--help` for full usage.
+
+Native executable (no JVM needed at runtime):
+
+```bash
+./gradlew :cli:nativeCompile          # -> cli/build/native/nativeCompile/swarm-share
+```
 
 ## Architecture
 
@@ -57,10 +63,12 @@ This separation means swapping TCP for TLS, or local disk for S3, only touches `
 ## Testing
 
 ```bash
-./gradlew test
+./gradlew build                       # unit tests + end-to-end tests (JVM) + coverage
+./gradlew jacocoAggregatedReport      # cross-module coverage -> build/reports/jacoco/
+./gradlew :cli:nativeE2eTest          # end-to-end tests against the native binary
 ```
 
-Unit tests use in-memory fakes; integration tests run a real two-node transfer over loopback TCP.
+Unit tests use in-memory fakes; integration tests run real TCP transfers over loopback; end-to-end tests launch the packaged CLI as separate processes.
 
 ## Status
 

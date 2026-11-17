@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
@@ -15,6 +17,7 @@ concurrency:
 
 jobs:
   build:
+    name: JVM build, unit + e2e tests, coverage
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,16 +34,12 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        # Caching is now enabled by default!
 
-      - name: Grant execute permission for Gradle Wrapper
-        run: chmod +x gradlew
+      - name: Build and run all tests
+        # `build` runs unit tests and the e2e suite against the JVM distribution
+        run: ./gradlew build jacocoAggregatedReport --build-cache --parallel
 
-      - name: Build and run tests
-        # Removed 'clean' and added optimization flags
-        run: ./gradlew build --build-cache --parallel
-
-      - name: Upload test reports
+      - name: Upload test and coverage reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -48,4 +47,43 @@ jobs:
           path: |
             **/build/reports/tests/**
             **/build/test-results/**
+            build/reports/jacoco/**
+          retention-days: 7
+
+  native:
+    name: GraalVM native image + e2e tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up GraalVM 25
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build native executable and run the e2e suite against it
+        run: ./gradlew :cli:nativeE2eTest --build-cache
+
+      - name: Upload native executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-share-linux-x64
+          path: cli/build/native/nativeCompile/swarm-share
+          retention-days: 7
+
+      - name: Upload native e2e reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-e2e-reports
+          path: cli/build/reports/tests/nativeE2eTest/**
           retention-days: 7

@@ -1,13 +1,6 @@
 package io.swarmshare.core.crypto;
 
 import org.junit.jupiter.api.Test;
-
-/**
- * Unit tests for {@link Sha256}.
- *
- * <p>Tests verify correct SHA-256 computation against known vectors,
- * case-insensitive comparison, and rejection of invalid hex input.
- */
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -20,7 +13,8 @@ import java.util.concurrent.CountDownLatch;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Unit tests for {@link Sha256} moved from storage to core.
+ * Unit tests for {@link Sha256}: known vectors, case-insensitive constant-time
+ * comparison, rejection of malformed hex, and safety under virtual threads.
  */
 class Sha256Test {
 
@@ -139,6 +133,22 @@ class Sha256Test {
         String hash = verifier.compute(bytes("file"));
         assertThat(verifier.hashesMatch(hash, hash.toUpperCase())).isTrue();
         assertThat(verifier.hashesMatch(hash, "0".repeat(64))).isFalse();
+    }
+
+    @ParameterizedTest(name = "hashesMatch rejects [{0}]")
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "not-hex"})
+    void hashesMatch_nullBlankOrMalformedExpected_returnsFalse(String expected) {
+        String actual = verifier.compute(bytes("file"));
+
+        assertThat(verifier.hashesMatch(actual, expected)).isFalse();
+        assertThat(verifier.hashesMatch(expected, actual)).isFalse();
+    }
+
+    @Test
+    void compute_emptyIterator_returnsEmptySha256() {
+        assertThat(verifier.compute(java.util.Collections.<byte[]>emptyIterator()))
+                .isEqualTo(verifier.compute(new byte[0]));
     }
 
     @Test

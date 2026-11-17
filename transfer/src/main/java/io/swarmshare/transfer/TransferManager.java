@@ -31,7 +31,7 @@ public final class TransferManager {
     /**
      * Maximum number of chunk downloads allowed in flight at once, across all peers.
      */
-    private static final int MAX_INFLIGHT = 32;
+    static final int MAX_INFLIGHT = 32;
 
     static final RetryPolicy DEFAULT_RETRY_POLICY =
             new RetryPolicy(3, Duration.ofMillis(100), Duration.ofSeconds(2));
@@ -108,6 +108,10 @@ public final class TransferManager {
         // Resume support: chunks already correct on disk are marked WRITTEN
         // immediately so they're skipped during download, without re-fetching them.
         BitSet existing = storage.checkExistingChunks(manifest);
+        if (!existing.isEmpty()) {
+            LOG.log(Level.INFO, "Resuming: {0} of {1} chunks already on disk",
+                    existing.cardinality(), manifest.totalChunks());
+        }
         existing.stream().forEach(i -> {
             heldChunks.set(i);
             ChunkId id = manifest.chunkAt(i).id();
@@ -115,13 +119,28 @@ public final class TransferManager {
             stateTracker.transition(id, ChunkState.MISSING, ChunkState.WRITTEN);
         });
 
-        Map<PeerInfo, BitSet> peerPieceMaps = collectPieceMaps();
-
         // Determine which chunks are still missing on disk and need download
         List<ChunkDescriptor> missing = manifest.chunks().stream()
                 .filter(desc -> !heldChunks.get(desc.id().index()))
                 .toList();
+        if (!missing.isEmpty()) {
+            downloadMissing(missing, collectPieceMaps());
+        }
 
+        verifyCompleteFile();
+    }
+
+    /**
+     * Schedules one virtual thread per missing chunk. Chunks that no reachable peer
+     * advertises are reported once, in aggregate, instead of once per chunk — a
+     * swarm with every peer down would otherwise print thousands of identical lines.
+     */
+    private void downloadMissing(List<ChunkDescriptor> missing, Map<PeerInfo, BitSet> peerPieceMaps) {
+        if (peerPieceMaps.isEmpty()) {
+            LOG.log(Level.WARNING, "None of the {0} configured peer(s) answered the piece-map request",
+                    peers.size());
+        }
+        int unavailable = 0;
         // try-with-resources on the executor blocks here until every submitted
         // download task completes (or is interrupted), since AutoCloseable
         // executors await task completion on close().
@@ -131,7 +150,7 @@ public final class TransferManager {
                 stateTracker.initialize(chunk.id());
                 PeerInfo source = selectPeer(chunk.id().index(), peerPieceMaps);
                 if (source == null) {
-                    LOG.log(Level.WARNING, "No peer has chunk {0}", chunk.id().index());
+                    unavailable++;
                     continue;
                 }
                 stateTracker.transition(chunk.id(), ChunkState.MISSING, ChunkState.SCHEDULED);
@@ -139,8 +158,10 @@ public final class TransferManager {
                 executor.submit(() -> downloadWithRetry(chunk, source, peerPieceMaps));
             }
         }
-
-        verifyCompleteFile();
+        if (unavailable > 0) {
+            LOG.log(Level.WARNING, "No reachable peer advertises {0} of {1} chunks",
+                    unavailable, manifest.totalChunks());
+        }
     }
 
     /**
@@ -270,22 +291,31 @@ public final class TransferManager {
         return result;
     }
 
+    /**
+     * Naive selection: the first peer, in the order the caller configured them, whose
+     * piece map advertises the chunk. Walking {@link #peers} rather than the
+     * concurrent map keeps the choice deterministic, so a user's peer list doubles
+     * as a priority list.
+     */
     private PeerInfo selectPeer(int chunkIndex, Map<PeerInfo, BitSet> pieceMaps) {
-        return pieceMaps.entrySet().stream()
-                .filter(e -> e.getValue().get(chunkIndex))
-                .map(Map.Entry::getKey)
+        return peers.stream()
+                .filter(peer -> advertises(pieceMaps, peer, chunkIndex))
                 .findFirst()
                 .orElse(null);
     }
 
     private PeerInfo selectAlternativePeer(int chunkIndex, PeerInfo exclude,
                                            Map<PeerInfo, BitSet> pieceMaps) {
-        return pieceMaps.entrySet().stream()
-                .filter(e -> !e.getKey().equals(exclude))
-                .filter(e -> e.getValue().get(chunkIndex))
-                .map(Map.Entry::getKey)
+        return peers.stream()
+                .filter(peer -> !peer.equals(exclude))
+                .filter(peer -> advertises(pieceMaps, peer, chunkIndex))
                 .findFirst()
                 .orElse(null);
+    }
+
+    private static boolean advertises(Map<PeerInfo, BitSet> pieceMaps, PeerInfo peer, int chunkIndex) {
+        BitSet pieceMap = pieceMaps.get(peer);
+        return pieceMap != null && pieceMap.get(chunkIndex);
     }
 
     private PeerInfo nextPeerAfterFailure(int chunkIndex, PeerInfo current,
@@ -294,8 +324,7 @@ public final class TransferManager {
         if (alternative != null) {
             return alternative;
         }
-        BitSet currentMap = pieceMaps.get(current);
-        return (currentMap != null && currentMap.get(chunkIndex)) ? current : null;
+        return advertises(pieceMaps, current, chunkIndex) ? current : null;
     }
 
     /**

@@ -6,6 +6,7 @@ import io.swarmshare.core.domain.Manifest;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Validates the internal consistency of a {@link Manifest}.
@@ -20,6 +21,11 @@ import java.util.List;
  * <h3>What is validated?</h3>
  * <ul>
  *   <li>No null or blank required string fields</li>
+ *   <li>{@code fileHash} and every chunk {@code sha256} are SHA-256 digests
+ *       (64 hex characters); anything else could never verify, so every
+ *       download would fail only after the bytes had been transferred</li>
+ *   <li>Every chunk except the last is exactly {@code chunkSize} bytes and the
+ *       last is at most {@code chunkSize} — the "fixed-size slice" definition</li>
  *   <li>{@code totalSize} matches the sum of all chunk sizes</li>
  *   <li>Each chunk's {@code offset} equals the sum of preceding chunk sizes</li>
  *   <li>Chunk indices are contiguous from 0</li>
@@ -33,6 +39,9 @@ import java.util.List;
  * both the success and failure cases explicitly, avoiding silent ignoring of errors.
  */
 public final class ManifestValidator {
+
+    /** A SHA-256 digest rendered as hex: 32 bytes, 64 characters, either case. */
+    private static final Pattern SHA256_HEX = Pattern.compile("[0-9a-fA-F]{64}");
 
     private ManifestValidator() {
     } // utility class — no instances
@@ -65,7 +74,12 @@ public final class ManifestValidator {
      * positive, appending a human-readable message to {@code out} for each violation.
      */
     private static void checkRequiredStrings(Manifest manifest, List<String> out) {
-        if (isBlank(manifest.fileHash())) out.add("fileHash must not be blank");
+        if (isBlank(manifest.fileHash())) {
+            out.add("fileHash must not be blank");
+        } else if (!isSha256Hex(manifest.fileHash())) {
+            out.add("fileHash must be a 64-character SHA-256 hex digest, got: '%s'"
+                    .formatted(manifest.fileHash()));
+        }
         if (isBlank(manifest.fileName())) out.add("fileName must not be blank");
         if (manifest.totalSize() <= 0) out.add("totalSize must be positive, got: " + manifest.totalSize());
         if (manifest.chunkSize() <= 0) out.add("chunkSize must be positive, got: " + manifest.chunkSize());
@@ -127,9 +141,23 @@ public final class ManifestValidator {
                         .formatted(i, desc.offset(), expectedOffset));
             }
 
-            // SHA-256 field present
+            // SHA-256 field present and well-formed
             if (isBlank(desc.sha256())) {
                 out.add("chunk %d has blank sha256".formatted(i));
+            } else if (!isSha256Hex(desc.sha256())) {
+                out.add("chunk %d sha256 is not a 64-character SHA-256 hex digest".formatted(i));
+            }
+
+            // Fixed-size slices: only the last chunk may be shorter than chunkSize
+            boolean last = i == manifest.chunks().size() - 1;
+            if (manifest.chunkSize() > 0 && desc.size() > 0) {
+                if (!last && desc.size() != manifest.chunkSize()) {
+                    out.add("chunk %d has size %d but every chunk except the last must be chunkSize (%d)"
+                            .formatted(i, desc.size(), manifest.chunkSize()));
+                } else if (last && desc.size() > manifest.chunkSize()) {
+                    out.add("last chunk %d has size %d, larger than chunkSize (%d)"
+                            .formatted(i, desc.size(), manifest.chunkSize()));
+                }
             }
 
             expectedOffset += Math.max(desc.size(), 0);
@@ -152,6 +180,10 @@ public final class ManifestValidator {
      */
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
+    }
+
+    private static boolean isSha256Hex(String s) {
+        return SHA256_HEX.matcher(s).matches();
     }
 
     // ── result type ──────────────────────────────────────────────────────────────

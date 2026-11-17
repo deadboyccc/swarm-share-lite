@@ -12,8 +12,11 @@ import io.swarmshare.transfer.TransferManager;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
+import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Parameters;
+import picocli.CommandLine.Spec;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -45,9 +48,52 @@ import java.util.concurrent.Callable;
 })
 public final class Main implements Runnable {
 
+    /**
+     * One line per record ({@code [LEVEL] message}) instead of JUL's default
+     * two-line, timestamped layout, which buries the message in CLI output.
+     */
+    private static final String LOG_FORMAT = "[%4$s] %5$s%6$s%n";
+
+    @Mixin
+    private HelpOption help;
+
     public static void main(String[] args) {
-        int exitCode = new CommandLine(new Main()).execute(args);
-        System.exit(exitCode);
+        if (System.getProperty("java.util.logging.SimpleFormatter.format") == null) {
+            System.setProperty("java.util.logging.SimpleFormatter.format", LOG_FORMAT);
+        }
+        System.exit(commandLine().execute(args));
+    }
+
+    /**
+     * Builds the configured command line. Failures inside a command are reported as a
+     * single {@code "<command> failed: <reason>"} line on stderr with exit code 1 —
+     * the reason, not a stack trace, is what a CLI user can act on.
+     */
+    static CommandLine commandLine() {
+        CommandLine cli = new CommandLine(new Main());
+        cli.setExecutionExceptionHandler((ex, commandLine, parseResult) -> {
+            commandLine.getErr().println(commandLine.getCommandName() + " failed: " + describe(ex));
+            return 1;
+        });
+        return cli;
+    }
+
+    /** Joins the messages of an exception chain, skipping wrappers that only repeat their cause. */
+    static String describe(Throwable failure) {
+        StringBuilder text = new StringBuilder();
+        for (Throwable t = failure; t != null; t = t.getCause()) {
+            String message = t.getMessage();
+            if (message == null || message.isBlank()) {
+                message = t.getClass().getSimpleName();
+            }
+            if (!text.toString().contains(message)) {
+                if (!text.isEmpty()) {
+                    text.append(": ");
+                }
+                text.append(message);
+            }
+        }
+        return text.toString();
     }
 
     @Override
@@ -84,6 +130,12 @@ public final class Main implements Runnable {
 
         private static final Logger LOG = System.getLogger(SeedCommand.class.getName());
 
+        @Mixin
+        private HelpOption help;
+
+        @Spec
+        private CommandSpec spec;
+
         @Parameters(index = "0", description = "File to seed")
         private Path file;
 
@@ -106,42 +158,13 @@ public final class Main implements Runnable {
             // write path, so no preallocation or resume logic is needed here.
             try (var storage = new FileChannelStorage(file);
                     var server = new TcpChunkServer(port, storage, manifest, heldChunksFor(manifest))) {
-                Thread serverThread = Thread.startVirtualThread(() -> {
-                    try {
-                        server.start();
-                    } catch (java.io.IOException e) {
-                        LOG.log(Level.ERROR, "Seeder failed to start: {0}", e.getMessage());
-                    }
-                });
-
-                long deadline = System.currentTimeMillis() + 5_000;
-                boolean bound = false;
-                while (System.currentTimeMillis() < deadline) {
-                    try {
-                        int boundPort = server.localPort();
-                        LOG.log(Level.INFO, "Seeder running. fileHash={0} port={1}", manifest.fileHash(), boundPort);
-                        bound = true;
-                        break;
-                    } catch (IllegalStateException ignored) {
-                        try {
-                            Thread.sleep(50);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            throw e;
-                        }
-                    }
-                }
-                if (!bound) {
-                    server.close();
-                    throw new IllegalStateException("Seeder did not bind to port " + port + " within 5 seconds");
-                }
-
-                try {
-                    serverThread.join();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw e;
-                }
+                // Bind on this thread so "address already in use" fails the command
+                // immediately with the real cause.
+                int boundPort = server.bind();
+                LOG.log(Level.INFO, "Seeder running. fileHash={0}", manifest.fileHash());
+                spec.commandLine().getOut().println("Listening on port " + boundPort);
+                spec.commandLine().getOut().flush();
+                server.serve(); // blocks until the process is stopped
             }
 
             return 0;
@@ -159,6 +182,12 @@ public final class Main implements Runnable {
     @Command(name = "build-manifest", description = "Compute, print, and persist a manifest")
     static final class BuildManifestCommand implements Callable<Integer> {
 
+        @Mixin
+        private HelpOption help;
+
+        @Spec
+        private CommandSpec spec;
+
         @Parameters(index = "0", description = "File to build a manifest for")
         private Path file;
 
@@ -174,15 +203,16 @@ public final class Main implements Runnable {
         public Integer call() {
             Manifest manifest = new ManifestBuilder(chunkSize).build(file);
 
-            System.out.println("fileHash=" + manifest.fileHash());
-            System.out.println("fileName=" + manifest.fileName());
-            System.out.println("totalSize=" + manifest.totalSize());
-            System.out.println("chunkSize=" + manifest.chunkSize());
-            System.out.println("totalChunks=" + manifest.totalChunks());
+            var out = spec.commandLine().getOut();
+            out.println("fileHash=" + manifest.fileHash());
+            out.println("fileName=" + manifest.fileName());
+            out.println("totalSize=" + manifest.totalSize());
+            out.println("chunkSize=" + manifest.chunkSize());
+            out.println("totalChunks=" + manifest.totalChunks());
 
             Path manifestPath = (outputOverride != null) ? outputOverride : manifestPathFor(file);
             new ManifestSerializer().write(manifest, manifestPath);
-            System.out.println("manifestPath=" + manifestPath);
+            out.println("manifestPath=" + manifestPath);
 
             return 0;
         }
@@ -197,13 +227,16 @@ public final class Main implements Runnable {
 
         private static final Logger LOG = System.getLogger(DownloadCommand.class.getName());
 
+        @Mixin
+        private HelpOption help;
+
         @Parameters(index = "0", description = "Path to the manifest JSON file")
         private Path manifestFile;
 
         @Parameters(index = "1", description = "Where to write the downloaded file")
         private Path output;
 
-        @Parameters(index = "2..*", description = "Peers to download from, as host:port")
+        @Parameters(index = "2..*", arity = "1..*", description = "Peers to download from, as host:port")
         private List<String> peerAddresses;
 
         @Override
@@ -256,5 +289,14 @@ public final class Main implements Runnable {
             var address = new InetSocketAddress(host, port);
             return new PeerInfo(UUID.randomUUID(), address);
         }
+    }
+
+    /**
+     * Adds {@code -h/--help} to a command. A mixin rather than
+     * {@code mixinStandardHelpOptions} because the CLI has no version to report.
+     */
+    static final class HelpOption {
+        @Option(names = {"-h", "--help"}, usageHelp = true, description = "Show this help message and exit.")
+        boolean helpRequested;
     }
 }

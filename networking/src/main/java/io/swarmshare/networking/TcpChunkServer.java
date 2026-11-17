@@ -35,6 +35,13 @@ public final class TcpChunkServer implements AutoCloseable {
     private static final Logger LOG = System.getLogger(TcpChunkServer.class.getName());
 
     /**
+     * How long a connected client may stay silent before its socket is closed.
+     * Matches the client-side timeout in {@link TcpPeerConnector}; without it an idle
+     * or half-open connection would pin a handler and a file descriptor forever.
+     */
+    static final int DEFAULT_CLIENT_TIMEOUT_MS = 10_000;
+
+    /**
      * TCP port this server binds to on {@link #start()}.
      */
     private final int port;
@@ -50,6 +57,10 @@ public final class TcpChunkServer implements AutoCloseable {
      * Bitmap of chunk indices this node currently holds, used to answer piece-map requests.
      */
     private final BitSet heldChunks;
+    /**
+     * Read timeout applied to every accepted socket.
+     */
+    private final int clientTimeoutMs;
 
     // Assigned once start() runs; volatile so close()/localPort() on other
     // threads see the up-to-date reference without extra synchronization.
@@ -61,20 +72,56 @@ public final class TcpChunkServer implements AutoCloseable {
      */
     private volatile boolean closed;
 
+    /**
+     * @param port       TCP port to bind; {@code 0} picks a free ephemeral port (see {@link #localPort()})
+     * @param storage    where chunk bytes are read from when serving
+     * @param manifest   the only swarm this server answers for
+     * @param heldChunks chunks this node may serve; the caller owns it and must mutate it
+     *                   only while holding its monitor, because handlers read it the same way
+     */
     public TcpChunkServer(int port, StorageProvider storage, Manifest manifest, BitSet heldChunks) {
+        this(port, storage, manifest, heldChunks, DEFAULT_CLIENT_TIMEOUT_MS);
+    }
+
+    /**
+     * Test seam: allows a short client timeout so idle-connection handling can be
+     * verified without waiting for the production default.
+     */
+    TcpChunkServer(int port, StorageProvider storage, Manifest manifest, BitSet heldChunks,
+                   int clientTimeoutMs) {
+        if (clientTimeoutMs <= 0) {
+            throw new IllegalArgumentException("clientTimeoutMs must be positive, got: " + clientTimeoutMs);
+        }
         this.port = port;
         this.storage = storage;
         this.manifest = manifest;
         this.heldChunks = heldChunks;
+        this.clientTimeoutMs = clientTimeoutMs;
     }
 
     /**
      * Binds to {@code port} and accepts connections until interrupted or
-     * {@link #close()} is called.
+     * {@link #close()} is called. Equivalent to {@link #bind()} followed by {@link #serve()}.
      */
     public void start() throws IOException {
+        bind();
+        serve();
+    }
+
+    /**
+     * Opens the listening socket without accepting connections yet. Splitting this
+     * from {@link #serve()} lets a caller report bind failures (port in use, no
+     * permission) synchronously and learn the real port when {@code port} was 0.
+     *
+     * @return the bound local port
+     * @throws IOException if the port cannot be bound or the server was closed
+     */
+    public int bind() throws IOException {
         if (closed) {
             throw new IOException("Server already closed");
+        }
+        if (serverSocket != null) {
+            throw new IllegalStateException("Server is already bound");
         }
         ExecutorService vtExecutor = Executors.newVirtualThreadPerTaskExecutor();
         ServerSocket socket;
@@ -91,17 +138,30 @@ public final class TcpChunkServer implements AutoCloseable {
         }
         executor = vtExecutor;
         serverSocket = socket;
-        LOG.log(Level.INFO, "Listening on port {0}", serverSocket.getLocalPort());
+        // String.valueOf: MessageFormat would otherwise render 7070 as "7,070"
+        LOG.log(Level.INFO, "Listening on port {0}", String.valueOf(socket.getLocalPort()));
+        return socket.getLocalPort();
+    }
 
+    /**
+     * Accepts connections on the socket opened by {@link #bind()} until interrupted or
+     * {@link #close()} is called. Each client is handled on its own virtual thread.
+     *
+     * @throws IllegalStateException if {@link #bind()} has not been called
+     * @throws IOException           on a genuine accept failure (not on close)
+     */
+    public void serve() throws IOException {
+        ServerSocket socket = serverSocket;
+        if (socket == null) {
+            throw new IllegalStateException("bind() must be called before serve()");
+        }
         try {
             // Accept loop: runs on the calling thread; each accepted client is
             // dispatched to its own virtual thread so a slow/stalled client can't
             // block subsequent accepts.
-            while (!Thread.currentThread().isInterrupted() && !serverSocket.isClosed()) {
-                Socket client = serverSocket.accept();
+            while (!Thread.currentThread().isInterrupted() && !socket.isClosed()) {
+                Socket client = socket.accept();
                 try {
-                    // Each client handled on its own virtual thread to avoid blocking carrier
-                    // threads
                     executor.submit(() -> handleClient(client));
                 } catch (RejectedExecutionException e) {
                     client.close();
@@ -111,7 +171,7 @@ public final class TcpChunkServer implements AutoCloseable {
             // ServerSocket.accept() throws IOException when close() is called
             // concurrently from another thread; treat that as a normal shutdown
             // rather than an error, and only propagate genuine I/O failures.
-            if (!serverSocket.isClosed()) {
+            if (!socket.isClosed()) {
                 throw e;
             }
         }
@@ -139,15 +199,25 @@ public final class TcpChunkServer implements AutoCloseable {
         try (client;
              var in = new DataInputStream(client.getInputStream());
              var out = new DataOutputStream(client.getOutputStream())) {
+            client.setSoTimeout(clientTimeoutMs);
 
             // First byte indicates message type; delegate to specific handlers.
             byte msgType = in.readByte();
-            switch (msgType) {
-                case FrameEncoder.MSG_PIECE_MAP_REQUEST -> handlePieceMapRequest(in, out);
-                case FrameEncoder.MSG_CHUNK_REQUEST -> handleChunkRequest(in, out);
-                // Unknown message type: reply with an error status rather than
-                // silently dropping the connection, so the peer isn't left hanging.
-                default -> FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_ERROR, new byte[0]);
+            try {
+                switch (msgType) {
+                    case FrameEncoder.MSG_PIECE_MAP_REQUEST -> handlePieceMapRequest(in, out);
+                    case FrameEncoder.MSG_CHUNK_REQUEST -> handleChunkRequest(in, out);
+                    // Unknown message type: reply with an error status rather than
+                    // silently dropping the connection, so the peer isn't left hanging.
+                    default -> FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_ERROR, new byte[0]);
+                }
+            } catch (RuntimeException e) {
+                // A storage failure (disk error, storage already closed) is our fault,
+                // not the peer's: answer with the protocol's ERROR status so the client
+                // fails fast and tries another peer instead of waiting for a timeout.
+                LOG.log(Level.WARNING, "Failed to serve request type 0x%02x: %s"
+                        .formatted(msgType, e.getMessage()));
+                FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_ERROR, new byte[0]);
             }
         } catch (IOException e) {
             // Client may disconnect abruptly; log at DEBUG and move on.
@@ -173,11 +243,15 @@ public final class TcpChunkServer implements AutoCloseable {
             return;
         }
 
+        // Read the bit under the monitor, but answer outside it: socket I/O must
+        // never happen while holding a lock (ARCHITECTURE.md §20.5).
+        boolean held;
         synchronized (heldChunks) {
-            if (!heldChunks.get(req.chunkIndex())) {
-                FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_NOT_FOUND, new byte[0]);
-                return;
-            }
+            held = heldChunks.get(req.chunkIndex());
+        }
+        if (!held) {
+            FrameEncoder.writeChunkResponse(out, FrameEncoder.STATUS_NOT_FOUND, new byte[0]);
+            return;
         }
 
         // Attempt to read the chunk from storage and reply with the bytes if present

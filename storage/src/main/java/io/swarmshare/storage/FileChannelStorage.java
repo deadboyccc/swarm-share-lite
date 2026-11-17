@@ -20,6 +20,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.BitSet;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Writes and reads chunks at explicit byte offsets in a pre-allocated output
@@ -59,6 +60,28 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      */
     private volatile FileChannel channel;
 
+    /**
+     * True only once {@link #preallocateSpace} has installed a read-write channel.
+     * A channel opened lazily by {@link #readChunk} (e.g. by a seeder) is read-only,
+     * so writes must be refused with a clear message instead of failing deep inside NIO.
+     */
+    private volatile boolean writable;
+
+    /**
+     * Terminal: once closed, the storage never reopens the file. Without this a late
+     * reader (for example a server handler racing shutdown) would silently reopen and
+     * leak a channel.
+     */
+    private volatile boolean closed;
+
+    /**
+     * Guards swapping, lazily opening, and closing {@link #channel}. A
+     * {@link ReentrantLock} rather than {@code synchronized} because opening the
+     * file is blocking I/O (ARCHITECTURE.md §20.5). Positional reads and writes do
+     * not take it.
+     */
+    private final ReentrantLock lifecycle = new ReentrantLock();
+
     public FileChannelStorage(Path outputPath) {
         this.outputPath = outputPath;
         this.verifier = new Sha256();
@@ -85,6 +108,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     public void preallocateSpace(long totalSize) {
         if (totalSize <= 0)
             throw new IllegalArgumentException("totalSize must be positive, got: " + totalSize);
+        ensureNotClosed();
 
         try {
             Path parent = outputPath.getParent();
@@ -113,9 +137,16 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
                 }
 
                 FileChannel previous;
-                synchronized (this) {
+                lifecycle.lock();
+                try {
+                    if (closed) {
+                        throw new IllegalStateException("Storage for %s is closed".formatted(outputPath));
+                    }
                     previous = channel;
                     channel = opened;
+                    writable = true;
+                } finally {
+                    lifecycle.unlock();
                 }
                 closeQuietly(previous);
 
@@ -124,7 +155,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
                 } else {
                     LOG.log(Level.INFO, "Pre-allocated {0} bytes at {1}", totalSize, outputPath);
                 }
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 try {
                     opened.close();
                 } catch (IOException suppressed) {
@@ -152,8 +183,9 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      */
     @Override
     public void writeChunk(ChunkId id, long offset, byte[] data) {
+        ensureNotClosed();
         FileChannel ch = channel;
-        if (ch == null || !ch.isOpen()) {
+        if (!writable || ch == null || !ch.isOpen()) {
             throw new IllegalStateException(
                     "Storage is not initialized for %s. Call preallocateSpace() before writing.".formatted(outputPath));
         }
@@ -181,6 +213,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
      * @param size   number of bytes to read
      * @return the chunk bytes, or {@link Optional#empty()} if the file is shorter
      *         than expected
+     * @throws IllegalStateException if this storage has been closed
      */
     @Override
     public Optional<byte[]> readChunk(ChunkId id, long offset, int size) {
@@ -188,6 +221,7 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
             throw new IllegalArgumentException("size must be >= 0, got: " + size);
         }
 
+        ensureNotClosed();
         ByteBuffer buffer = ByteBuffer.allocate(size);
         try {
             FileChannel ch = ensureReadableChannel();
@@ -248,20 +282,18 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
     // ── Closeable ────────────────────────────────────────────────────────────────
 
     /**
-     * Closes the underlying {@link FileChannel}.
-     *
-     * <p>
-     * Idempotent — safe to call more than once. Exceptions during close are logged
-     * but not propagated; the channel is unusable regardless of whether
-     * {@code close()}
-     * itself throws.
+     * Returns the current channel, lazily opening the file read-only when no channel
+     * exists yet. This is the seeder path: it serves an existing file and never calls
+     * {@link #preallocateSpace}, so it must not get write access.
      */
     private FileChannel ensureReadableChannel() throws IOException {
         FileChannel ch = channel;
         if (ch != null && ch.isOpen()) {
             return ch;
         }
-        synchronized (this) {
+        lifecycle.lock();
+        try {
+            ensureNotClosed();
             ch = channel;
             if (ch != null && ch.isOpen()) {
                 return ch;
@@ -271,16 +303,39 @@ public final class FileChannelStorage implements StorageProvider, Closeable {
             }
             ch = FileChannel.open(outputPath, StandardOpenOption.READ);
             channel = ch;
+            writable = false;
             return ch;
+        } finally {
+            lifecycle.unlock();
         }
     }
 
+    private void ensureNotClosed() {
+        if (closed) {
+            throw new IllegalStateException("Storage for %s is closed".formatted(outputPath));
+        }
+    }
+
+    /**
+     * Closes the underlying {@link FileChannel}. Closing is terminal: later reads and
+     * writes throw {@link IllegalStateException} rather than reopening the file.
+     *
+     * <p>
+     * Idempotent — safe to call more than once. Exceptions during close are logged
+     * but not propagated; the channel is unusable regardless of whether
+     * {@code close()} itself throws.
+     */
     @Override
     public void close() {
         FileChannel ch;
-        synchronized (this) {
+        lifecycle.lock();
+        try {
+            closed = true;
+            writable = false;
             ch = channel;
             channel = null;
+        } finally {
+            lifecycle.unlock();
         }
         closeQuietly(ch);
     }

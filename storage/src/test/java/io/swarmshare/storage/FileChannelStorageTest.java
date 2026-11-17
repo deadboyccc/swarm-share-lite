@@ -1,14 +1,6 @@
 package io.swarmshare.storage;
 
 import io.swarmshare.core.crypto.Sha256;
-
-/**
- * Unit tests for {@link FileChannelStorage}.
- *
- * <p>Tests cover concurrent writes to disjoint offsets, read error handling,
- * pre-allocation behavior, and chunk validation. Uses temporary directories
- * and files that are automatically cleaned up after each test.
- */
 import io.swarmshare.core.domain.ChunkDescriptor;
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
@@ -20,47 +12,35 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
-import java.util.Optional;
+import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
- * Integration tests for {@link FileChannelStorage}.
+ * Tests for {@link FileChannelStorage} against the real filesystem.
  *
  * <p>
- * "Integration" here means real filesystem I/O — no mocking of the channel
- * itself.
- * JUnit's {@link TempDir} guarantees isolation: each test class gets a fresh
- * directory
- * that is deleted (recursively) after the suite, regardless of test outcome.
- *
- * <p>
- * Coverage targets:
- * <ul>
- * <li>{@code preallocateSpace} — file created, exact size, idempotency /
- * rejection of zero</li>
- * <li>{@code writeChunk} — bytes land at the correct offset, adjacent chunks
- * don't bleed</li>
- * <li>{@code readChunk} — round-trip fidelity, EOF sentinel for out-of-bounds
- * reads</li>
- * <li>{@code checkExistingChunks} — BitSet reflects valid vs. corrupted vs.
- * missing chunks</li>
- * <li>{@code close} — idempotent, channel closed after try-with-resources</li>
- * </ul>
+ * Nothing is mocked: the domain records are cheap to build and the point of this
+ * adapter is the interaction with {@code FileChannel}. {@link TempDir} gives every
+ * test a fresh directory that is deleted afterwards.
  */
 class FileChannelStorageTest {
+
+    private static final String MANIFEST_HASH = "a".repeat(64);
+    private static final Sha256 SHA = new Sha256();
 
     @TempDir
     Path tempDir;
 
     private Path testFile;
     private FileChannelStorage storage;
-    private final Sha256 verifier = new Sha256();
 
     @BeforeEach
     void setUp() {
@@ -70,7 +50,6 @@ class FileChannelStorageTest {
 
     @AfterEach
     void tearDown() {
-        // close() is idempotent — safe even if a test already closed it
         storage.close();
     }
 
@@ -80,7 +59,6 @@ class FileChannelStorageTest {
     void preallocateSpace_createsFileWithExactSize() throws IOException {
         storage.preallocateSpace(1024);
 
-        assertThat(testFile).exists();
         assertThat(Files.size(testFile)).isEqualTo(1024);
     }
 
@@ -92,11 +70,13 @@ class FileChannelStorageTest {
     }
 
     @Test
-    void preallocateSpace_largeSizes_allocatesCorrectly() throws IOException {
-        long size = 10 * 1024 * 1024L; // 10 MiB
-        storage.preallocateSpace(size);
+    void preallocateSpace_createsMissingParentDirectories() throws IOException {
+        Path nested = tempDir.resolve("a/b/out.bin");
+        try (var nestedStorage = new FileChannelStorage(nested)) {
+            nestedStorage.preallocateSpace(8);
+        }
 
-        assertThat(Files.size(testFile)).isEqualTo(size);
+        assertThat(Files.size(nested)).isEqualTo(8);
     }
 
     @Test
@@ -120,82 +100,130 @@ class FileChannelStorageTest {
         storage.preallocateSpace(existing.length);
 
         assertThat(Files.readAllBytes(testFile)).isEqualTo(existing);
-        assertThat(Files.size(testFile)).isEqualTo(existing.length);
     }
 
-    // ── writeChunk / readChunk — round-trip ──────────────────────────────────────
+    @Test
+    void preallocateSpace_largerExistingFile_isTruncatedToManifestSize() throws IOException {
+        Files.write(testFile, new byte[100]);
+
+        storage.preallocateSpace(40);
+
+        assertThat(Files.size(testFile)).isEqualTo(40);
+    }
+
+    @Test
+    void preallocateSpace_shorterExistingFile_isExtendedAndKeepsPrefix() throws IOException {
+        Files.write(testFile, "prefix".getBytes());
+
+        storage.preallocateSpace(32);
+
+        byte[] content = Files.readAllBytes(testFile);
+        assertThat(content).hasSize(32);
+        assertThat(new String(content, 0, 6)).isEqualTo("prefix");
+    }
+
+    // ── writeChunk / readChunk ───────────────────────────────────────────────────
 
     @Test
     void writeChunk_thenReadChunk_returnsIdenticalBytes() {
         byte[] payload = "swarm-chunk-payload".getBytes();
-        long offset = 0;
         storage.preallocateSpace(payload.length);
 
-        storage.writeChunk(chunkId(0), offset, payload);
+        storage.writeChunk(chunkId(0), 0, payload);
 
-        Optional<byte[]> result = storage.readChunk(chunkId(0), offset, payload.length);
-        assertThat(result).isPresent();
-        assertThat(result.get()).isEqualTo(payload);
+        assertThat(storage.readChunk(chunkId(0), 0, payload.length)).contains(payload);
     }
 
     @Test
     void writeChunk_atNonZeroOffset_writesOnlyToTargetRange() {
-        // File layout: [zeros | payload | zeros]
-        long fileSize = 64;
         byte[] payload = "HELLO".getBytes();
         long offset = 16;
-        storage.preallocateSpace(fileSize);
+        storage.preallocateSpace(64);
 
         storage.writeChunk(chunkId(0), offset, payload);
 
-        // Bytes before the offset must still be zero
-        Optional<byte[]> prefix = storage.readChunk(chunkId(0), 0, (int) offset);
-        assertThat(prefix).isPresent();
-        assertThat(prefix.get()).containsOnly((byte) 0);
-
-        // Written region must match exactly
-        Optional<byte[]> written = storage.readChunk(chunkId(0), offset, payload.length);
-        assertThat(written).isPresent();
-        assertThat(written.get()).isEqualTo(payload);
+        assertThat(storage.readChunk(chunkId(0), 0, (int) offset))
+                .hasValueSatisfying(prefix -> assertThat(prefix).containsOnly((byte) 0));
+        assertThat(storage.readChunk(chunkId(0), offset, payload.length)).contains(payload);
     }
 
     @Test
-    void writeChunk_multipleChunks_adjacentRegionsDoNotBleed() {
+    void writeChunk_adjacentChunks_doNotBleed() {
         byte[] chunkA = "AAAA".getBytes();
         byte[] chunkB = "BBBB".getBytes();
-        long offsetA = 0;
-        long offsetB = chunkA.length;
-        storage.preallocateSpace(chunkA.length + chunkB.length);
+        storage.preallocateSpace(8);
 
-        storage.writeChunk(chunkId(0), offsetA, chunkA);
-        storage.writeChunk(chunkId(1), offsetB, chunkB);
+        storage.writeChunk(chunkId(1), 4, chunkB);
+        storage.writeChunk(chunkId(0), 0, chunkA);
 
-        assertThat(storage.readChunk(chunkId(0), offsetA, chunkA.length))
-                .isPresent()
-                .hasValueSatisfying(b -> assertThat(b).isEqualTo(chunkA));
+        assertThat(storage.readChunk(chunkId(0), 0, 4)).contains(chunkA);
+        assertThat(storage.readChunk(chunkId(1), 4, 4)).contains(chunkB);
+    }
 
-        assertThat(storage.readChunk(chunkId(1), offsetB, chunkB.length))
-                .isPresent()
-                .hasValueSatisfying(b -> assertThat(b).isEqualTo(chunkB));
+    @Test
+    void writeChunk_concurrentVirtualThreadsAtDisjointOffsets_assembleExactFile() throws Exception {
+        int chunkSize = 4096;
+        int chunks = 64;
+        byte[] expected = new byte[chunkSize * chunks];
+        new Random(7).nextBytes(expected);
+        storage.preallocateSpace(expected.length);
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<?>> writes = new ArrayList<>();
+            for (int i = chunks - 1; i >= 0; i--) { // reverse order: out-of-order arrival
+                int index = i;
+                writes.add(executor.submit(() -> {
+                    byte[] slice = new byte[chunkSize];
+                    System.arraycopy(expected, index * chunkSize, slice, 0, chunkSize);
+                    storage.writeChunk(chunkId(index), (long) index * chunkSize, slice);
+                }));
+            }
+            for (Future<?> write : writes) {
+                write.get();
+            }
+        }
+        storage.flush();
+
+        assertThat(Files.readAllBytes(testFile)).isEqualTo(expected);
+    }
+
+    @Test
+    void writeChunk_beforePreallocate_isRejected() {
+        assertThatThrownBy(() -> storage.writeChunk(chunkId(0), 0, new byte[]{1}))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("preallocateSpace");
+    }
+
+    @Test
+    void writeChunk_afterReadOnlyLazyOpen_isRejectedWithClearMessage() throws IOException {
+        Files.write(testFile, "seed-file".getBytes());
+        assertThat(storage.readChunk(chunkId(0), 0, 4)).isPresent(); // opens read-only
+
+        assertThatThrownBy(() -> storage.writeChunk(chunkId(0), 0, new byte[]{1}))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("preallocateSpace");
     }
 
     @Test
     void readChunk_beyondEOF_returnsEmpty() {
         storage.preallocateSpace(8);
 
-        // Reading past the end of file must return Optional.empty(), not throw
-        Optional<byte[]> result = storage.readChunk(chunkId(0), 0, 1024);
-        assertThat(result).isEmpty();
+        assertThat(storage.readChunk(chunkId(0), 0, 1024)).isEmpty();
     }
 
     @Test
     void readChunk_exactlyAtEndOfFile_returnsEmpty() {
-        long size = 16;
-        storage.preallocateSpace(size);
+        storage.preallocateSpace(16);
 
-        // Offset == fileSize means we start reading at EOF
-        Optional<byte[]> result = storage.readChunk(chunkId(0), size, 1);
-        assertThat(result).isEmpty();
+        assertThat(storage.readChunk(chunkId(0), 16, 1)).isEmpty();
+    }
+
+    @Test
+    void readChunk_negativeSize_isRejected() {
+        storage.preallocateSpace(16);
+
+        assertThatThrownBy(() -> storage.readChunk(chunkId(0), 0, -1))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -203,12 +231,12 @@ class FileChannelStorageTest {
         byte[] payload = "existing-file-content".getBytes();
         Files.write(testFile, payload);
 
-        FileChannelStorage existingStorage = new FileChannelStorage(testFile);
-        Optional<byte[]> result = existingStorage.readChunk(chunkId(0), 0L, payload.length);
+        assertThat(storage.readChunk(chunkId(0), 0L, payload.length)).contains(payload);
+    }
 
-        assertThat(result).isPresent();
-        assertThat(result.get()).isEqualTo(payload);
-        existingStorage.close();
+    @Test
+    void readChunk_missingFileWithoutPreallocate_returnsEmpty() {
+        assertThat(storage.readChunk(chunkId(0), 0L, 4)).isEmpty();
     }
 
     // ── checkExistingChunks ──────────────────────────────────────────────────────
@@ -217,152 +245,125 @@ class FileChannelStorageTest {
     void checkExistingChunks_allValidChunks_allBitsSet() {
         byte[] data0 = "chunk-zero".getBytes();
         byte[] data1 = "chunk-one!".getBytes();
-        int chunkSize = data0.length; // both same length for simplicity
+        storage.preallocateSpace(20);
+        storage.writeChunk(chunkId(0), 0, data0);
+        storage.writeChunk(chunkId(1), 10, data1);
 
-        storage.preallocateSpace((long) chunkSize * 2);
-        storage.writeChunk(chunkId(0), 0L, data0);
-        storage.writeChunk(chunkId(1), chunkSize, data1);
+        BitSet result = storage.checkExistingChunks(manifestOf(10, data0, data1));
 
-        Manifest manifest = manifestOf(
-                chunkDescriptor(0, 0L, chunkSize, verifier.compute(data0)),
-                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(data1)));
-
-        BitSet result = storage.checkExistingChunks(manifest);
-
-        assertThat(result.get(0)).isTrue();
-        assertThat(result.get(1)).isTrue();
         assertThat(result.cardinality()).isEqualTo(2);
     }
 
     @Test
     void checkExistingChunks_corruptedChunk_bitNotSet() {
         byte[] good = "good-data-123456".getBytes();
-        byte[] corrupt = "xxxx-corrupted!!".getBytes();
-        int chunkSize = good.length;
+        byte[] expectedSecond = "second-chunk-abc".getBytes();
+        storage.preallocateSpace(32);
+        storage.writeChunk(chunkId(0), 0, good);
+        storage.writeChunk(chunkId(1), 16, "xxxx-corrupted!!".getBytes());
 
-        storage.preallocateSpace((long) chunkSize * 2);
-        storage.writeChunk(chunkId(0), 0L, good);
-        storage.writeChunk(chunkId(1), chunkSize, corrupt); // written, but wrong hash registered
+        BitSet result = storage.checkExistingChunks(manifestOf(16, good, expectedSecond));
 
-        Manifest manifest = manifestOf(
-                chunkDescriptor(0, 0L, chunkSize, verifier.compute(good)),
-                // Manifest declares correct hash, but on-disk bytes are corrupt
-                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(good)));
+        assertThat(result.get(0)).as("valid chunk 0").isTrue();
+        assertThat(result.get(1)).as("corrupted chunk 1").isFalse();
+    }
 
-        BitSet result = storage.checkExistingChunks(manifest);
+    @Test
+    void checkExistingChunks_tornWriteOfLastChunk_isNotTrusted() throws IOException {
+        byte[] data0 = "complete".getBytes();
+        byte[] data1 = "torn-end".getBytes();
+        Files.write(testFile, (new String(data0) + "torn").getBytes()); // crash mid-write
 
-        assertThat(result.get(0)).as("valid chunk 0 must be set").isTrue();
-        assertThat(result.get(1)).as("corrupted chunk 1 must not be set").isFalse();
+        BitSet result = storage.checkExistingChunks(manifestOf(8, data0, data1));
+
+        assertThat(result.get(0)).isTrue();
+        assertThat(result.get(1)).isFalse();
     }
 
     @Test
     void preallocateSpace_onCompleteFile_doesNotInvalidateExistingChunks() {
         byte[] data0 = "resume-chunk-0".getBytes();
         byte[] data1 = "resume-chunk-1".getBytes();
-        int chunkSize = data0.length;
-
-        storage.preallocateSpace((long) chunkSize * 2);
-        storage.writeChunk(chunkId(0), 0L, data0);
-        storage.writeChunk(chunkId(1), chunkSize, data1);
+        storage.preallocateSpace(28);
+        storage.writeChunk(chunkId(0), 0, data0);
+        storage.writeChunk(chunkId(1), 14, data1);
         storage.close();
 
-        FileChannelStorage resumed = new FileChannelStorage(testFile);
-        resumed.preallocateSpace((long) chunkSize * 2);
+        try (var resumed = new FileChannelStorage(testFile)) {
+            resumed.preallocateSpace(28);
 
-        Manifest manifest = manifestOf(
-                chunkDescriptor(0, 0L, chunkSize, verifier.compute(data0)),
-                chunkDescriptor(1, chunkSize, chunkSize, verifier.compute(data1)));
-
-        BitSet result = resumed.checkExistingChunks(manifest);
-        resumed.close();
-
-        assertThat(result.get(0)).isTrue();
-        assertThat(result.get(1)).isTrue();
-        assertThat(result.cardinality()).isEqualTo(2);
-    }
-
-    @Test
-    void checkExistingChunks_emptyManifest_returnsEmptyBitSet() {
-        storage.preallocateSpace(64);
-
-        Manifest manifest = manifestOf(); // no chunks declared
-
-        BitSet result = storage.checkExistingChunks(manifest);
-
-        assertThat(result.isEmpty()).isTrue();
-    }
-
-    // ── close ────────────────────────────────────────────────────────────────────
-
-    @Test
-    void close_isIdempotent_doesNotThrow() {
-        storage.preallocateSpace(64);
-
-        // Calling close() multiple times must never throw
-        storage.close();
-        storage.close();
-        storage.close();
-    }
-
-    @Test
-    void close_withoutPreallocate_doesNotThrow() {
-        // Channel is null when close() is called before preallocateSpace()
-        storage.close();
-    }
-
-    @Test
-    void close_viaAutoCloseable_channelReleasedAfterBlock() throws IOException {
-        Path file = tempDir.resolve("closeable-test.bin");
-        try (FileChannelStorage s = new FileChannelStorage(file)) {
-            s.preallocateSpace(32);
-            // Channel is open inside the block
-        }
-        // File still exists but the channel is released; we can re-open it
-        assertThat(file).exists();
-        // Re-opening the same path must succeed (no exclusive lock held)
-        try (FileChannelStorage s2 = new FileChannelStorage(tempDir.resolve("closeable-test-2.bin"))) {
-            s2.preallocateSpace(32);
+            assertThat(resumed.checkExistingChunks(manifestOf(14, data0, data1)).cardinality()).isEqualTo(2);
         }
     }
 
+    // ── flush / close ────────────────────────────────────────────────────────────
+
     @Test
-    void flush_afterWrites_doesNotThrow() {
+    void flush_afterWrites_keepsDataReadable() {
         storage.preallocateSpace(16);
         storage.writeChunk(chunkId(0), 0L, "durable".getBytes());
+
         storage.flush();
-        storage.flush();
+
+        assertThat(storage.readChunk(chunkId(0), 0, 7)).contains("durable".getBytes());
     }
 
     @Test
     void flush_beforePreallocate_isNoOp() {
-        storage.flush();
+        assertThatCode(storage::flush).doesNotThrowAnyException();
+        assertThat(testFile).doesNotExist();
+    }
+
+    @Test
+    void close_isIdempotent() {
+        storage.preallocateSpace(64);
+
+        assertThatCode(() -> {
+            storage.close();
+            storage.close();
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void close_isTerminal_readsAndWritesAreRejected() {
+        storage.preallocateSpace(8);
+        storage.close();
+
+        assertThatThrownBy(() -> storage.readChunk(chunkId(0), 0, 4))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+        assertThatThrownBy(() -> storage.writeChunk(chunkId(0), 0, new byte[]{1}))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+        assertThatThrownBy(() -> storage.preallocateSpace(8))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+    }
+
+    @Test
+    void close_releasesFileSoItCanBeDeleted() throws IOException {
+        storage.preallocateSpace(32);
+        storage.close();
+
+        Files.delete(testFile);
+
+        assertThat(testFile).doesNotExist();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private static ChunkId chunkId(int index) {
-        ChunkId id = mock(ChunkId.class);
-        when(id.index()).thenReturn(index);
-        return id;
+        return new ChunkId(MANIFEST_HASH, index);
     }
 
-    private static ChunkDescriptor chunkDescriptor(int index, long offset, int size, String sha256) {
-        ChunkDescriptor desc = mock(ChunkDescriptor.class);
-
-        // BUG FIX: Isolate the nested mock creation before passing it to thenReturn()
-        ChunkId resolvedId = chunkId(index);
-
-        when(desc.id()).thenReturn(resolvedId);
-        when(desc.offset()).thenReturn(offset);
-        when(desc.size()).thenReturn(size);
-        when(desc.sha256()).thenReturn(sha256);
-        return desc;
-    }
-
-    private static Manifest manifestOf(ChunkDescriptor... descriptors) {
-        Manifest manifest = mock(Manifest.class);
-        when(manifest.chunks()).thenReturn(List.of(descriptors));
-        when(manifest.totalChunks()).thenReturn(descriptors.length);
-        return manifest;
+    /** Manifest whose chunks are laid out back to back with the hashes of {@code contents}. */
+    private static Manifest manifestOf(int chunkSize, byte[]... contents) {
+        List<ChunkDescriptor> descriptors = new ArrayList<>();
+        long offset = 0;
+        for (int i = 0; i < contents.length; i++) {
+            descriptors.add(new ChunkDescriptor(chunkId(i), offset, contents[i].length, SHA.compute(contents[i])));
+            offset += contents[i].length;
+        }
+        return new Manifest(MANIFEST_HASH, "test.bin", offset, chunkSize, descriptors);
     }
 }

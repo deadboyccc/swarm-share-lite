@@ -1,0 +1,16 @@
+{
+  "reflection": [
+    {
+      "type": "io.swarmshare.manifest.ManifestSerializer$ManifestDto",
+      "allDeclaredConstructors": true,
+      "allDeclaredMethods": true,
+      "allDeclaredFields": true
+    },
+    {
+      "type": "io.swarmshare.manifest.ManifestSerializer$ChunkDto",
+      "allDeclaredConstructors": true,
+      "allDeclaredMethods": true,
+      "allDeclaredFields": true
+    }
+  ]
+}

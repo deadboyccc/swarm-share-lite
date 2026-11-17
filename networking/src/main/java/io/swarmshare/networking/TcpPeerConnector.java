@@ -95,7 +95,8 @@ public final class TcpPeerConnector implements PeerConnector, AutoCloseable {
             } catch (IOException e) {
                 // Wrap as unchecked so it can propagate through CompletableFuture,
                 // which does not support checked exceptions in supplyAsync.
-                throw new RuntimeException("Chunk fetch failed: " + id, e);
+                throw new RuntimeException("Chunk fetch failed: chunk %d from %s: %s"
+                        .formatted(id.index(), peer.displayAddress(), e.getMessage()), e);
             }
         }, virtualExecutor);
     }
@@ -143,7 +144,8 @@ public final class TcpPeerConnector implements PeerConnector, AutoCloseable {
                 byte[] bitSetBytes = FrameDecoder.readExactly(in, dataLen);
                 return BitSet.valueOf(bitSetBytes);
             } catch (IOException e) {
-                throw new RuntimeException("PieceMap fetch failed for peer: " + peer.id(), e);
+                throw new RuntimeException("PieceMap fetch failed for peer %s: %s"
+                        .formatted(peer.displayAddress(), e.getMessage()), e);
             }
         }, virtualExecutor);
     }

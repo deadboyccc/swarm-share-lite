@@ -3,13 +3,6 @@ package io.swarmshare.manifest;
 
 import io.swarmshare.core.domain.ChunkDescriptor;
 
-/**
- * Unit tests for {@link ManifestSerializer}.
- *
- * <p>Tests verify JSON round-trip serialization and deserialization,
- * ensuring the wire contract is stable and manifests can be reliably
- * exchanged between seeder and peers.
- */
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
 import org.junit.jupiter.api.Test;

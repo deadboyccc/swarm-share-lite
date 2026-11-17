@@ -2,14 +2,6 @@
 package io.swarmshare.manifest;
 
 import io.swarmshare.core.domain.ChunkDescriptor;
-
-/**
- * Unit tests for {@link ManifestValidator}.
- *
- * <p>Tests ensure manifests are validated consistently: chunk offsets,
- * sizes, hashes, required string fields, and internal consistency checks.
- * Both valid and invalid manifest scenarios are covered.
- */
 import io.swarmshare.core.domain.ChunkId;
 import io.swarmshare.core.domain.Manifest;
 import io.swarmshare.manifest.ManifestValidator.ValidationResult;
@@ -340,5 +332,68 @@ class ManifestValidatorTest {
                 assertThat(result).isInstanceOf(ValidationResult.Invalid.class);
                 assertThat(((ValidationResult.Invalid) result).summary())
                                 .contains("exceeds maximum");
+        }
+
+        // ── SHA-256 format and fixed-size chunks ─────────────────────────────────────
+
+        @ParameterizedTest(name = "malformed fileHash [{0}]")
+        @ValueSource(strings = {"abc", "zz", "a"})
+        void validate_fileHashNotSha256Hex_returnsInvalid(String bad) {
+                Manifest manifest = new Manifest(bad, "f.bin", 1L, 1, List.of(chunk(bad, 0, 0L, 1)));
+
+                assertThat(violationsOf(manifest)).anyMatch(v -> v.contains("fileHash must be a 64-character"));
+        }
+
+        @Test
+        void validate_fileHashUpperCaseHex_isAccepted() {
+                String upper = "A".repeat(64);
+                Manifest manifest = new Manifest(upper, "f.bin", 100L, 100, List.of(chunk(upper, 0, 0L, 100)));
+
+                assertThat(ManifestValidator.validate(manifest)).isInstanceOf(ValidationResult.Valid.class);
+        }
+
+        @Test
+        void validate_chunkSha256NotHex_returnsInvalid() {
+                List<ChunkDescriptor> chunks = List.of(
+                                new ChunkDescriptor(new ChunkId(VALID_HASH, 0), 0L, 100, "g".repeat(64)));
+                Manifest manifest = new Manifest(VALID_HASH, "f.bin", 100L, 100, chunks);
+
+                assertThat(violationsOf(manifest)).anyMatch(v -> v.contains("chunk 0 sha256 is not"));
+        }
+
+        @Test
+        void validate_nonLastChunkShorterThanChunkSize_returnsInvalid() {
+                List<ChunkDescriptor> chunks = List.of(
+                                chunk(VALID_HASH, 0, 0L, 60),
+                                chunk(VALID_HASH, 1, 60L, 100));
+                Manifest manifest = new Manifest(VALID_HASH, "f.bin", 160L, 100, chunks);
+
+                assertThat(violationsOf(manifest)).anyMatch(v -> v.contains("every chunk except the last"));
+        }
+
+        @Test
+        void validate_lastChunkLargerThanChunkSize_returnsInvalid() {
+                List<ChunkDescriptor> chunks = List.of(
+                                chunk(VALID_HASH, 0, 0L, 100),
+                                chunk(VALID_HASH, 1, 100L, 150));
+                Manifest manifest = new Manifest(VALID_HASH, "f.bin", 250L, 100, chunks);
+
+                assertThat(violationsOf(manifest)).anyMatch(v -> v.contains("larger than chunkSize"));
+        }
+
+        @Test
+        void validate_shorterLastChunk_isValid() {
+                List<ChunkDescriptor> chunks = List.of(
+                                chunk(VALID_HASH, 0, 0L, 100),
+                                chunk(VALID_HASH, 1, 100L, 1));
+                Manifest manifest = new Manifest(VALID_HASH, "f.bin", 101L, 100, chunks);
+
+                assertThat(ManifestValidator.validate(manifest)).isInstanceOf(ValidationResult.Valid.class);
+        }
+
+        private static List<String> violationsOf(Manifest manifest) {
+                ValidationResult result = ManifestValidator.validate(manifest);
+                assertThat(result).isInstanceOf(ValidationResult.Invalid.class);
+                return ((ValidationResult.Invalid) result).violations();
         }
 }
