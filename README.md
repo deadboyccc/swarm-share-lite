@@ -143,7 +143,7 @@ The native build needs about 1.5 GB of free memory.
 | Multi-host | A seeder and two leechers in separate containers on a Docker network (Testcontainers; needs Docker) |
 
 The same end-to-end suite runs against the JVM distribution and the native binary.
-v1.0.0: **301 tests**, aggregated coverage **92% of lines, 88% of branches**.
+v1.0.0: **300+ tests**, aggregated coverage **about 92% of lines and 88% of branches**.
 
 ## Status
 
