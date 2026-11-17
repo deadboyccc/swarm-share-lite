@@ -108,12 +108,10 @@ class TcpPeerConnectorTest {
     }
 
     @Test
-    void fetchChunk_connectionRefused_failsExceptionally() throws Exception {
-        int closedPort;
-        try (var probe = new ServerSocket(0)) {
-            closedPort = probe.getLocalPort();
-        }
-        PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("localhost", closedPort));
+    void fetchChunk_connectionRefused_failsExceptionally() {
+        // Port 1 (tcpmux) has no listener on any normal host. A just-released
+        // ephemeral port would not do: a parallel test may bind it again.
+        PeerInfo peer = new PeerInfo(UUID.randomUUID(), new InetSocketAddress("127.0.0.1", 1));
 
         assertThatThrownBy(() -> connector.fetchChunkAsync(peer, CHUNK, 10).join())
                 .isInstanceOf(CompletionException.class)

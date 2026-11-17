@@ -21,6 +21,7 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -238,16 +239,23 @@ class TcpChunkServerTest {
     }
 
     @Test
-    void close_stopsAcceptingConnections() throws Exception {
-        int port = start(allHeld(), storageOf(Map.of()));
+    void close_endsTheAcceptLoopAsANormalShutdown() throws Exception {
+        server = new TcpChunkServer(0, storageOf(Map.of()), MANIFEST, allHeld());
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread serving = Thread.startVirtualThread(() -> {
+            try {
+                server.start();
+            } catch (Throwable t) {
+                failure.set(t);
+            }
+        });
+        awaitBound(server);
 
         server.close();
+        serving.join(5_000);
 
-        assertThatThrownBy(() -> {
-            try (var socket = new Socket()) {
-                socket.connect(new InetSocketAddress("localhost", port), 1_000);
-            }
-        }).isInstanceOf(IOException.class);
+        assertThat(serving.isAlive()).as("accept loop still running after close()").isFalse();
+        assertThat(failure.get()).as("close() is not an error").isNull();
     }
 
     @Test
@@ -271,6 +279,10 @@ class TcpChunkServerTest {
                 // closed by tearDown
             }
         });
+        return awaitBound(server);
+    }
+
+    private static int awaitBound(TcpChunkServer server) throws InterruptedException {
         long deadline = System.nanoTime() + 5_000_000_000L;
         while (System.nanoTime() < deadline) {
             try {

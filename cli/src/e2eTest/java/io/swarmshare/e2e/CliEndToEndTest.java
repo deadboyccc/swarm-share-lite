@@ -25,6 +25,11 @@ class CliEndToEndTest {
 
     private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(60);
     private static final int MIB = 1024 * 1024;
+    /**
+     * Port 1 (tcpmux) has no listener on any normal host. A just-released ephemeral
+     * port would not do: another test may bind it again before it is used.
+     */
+    private static final String DEAD_PEER = "127.0.0.1:1";
 
     @TempDir
     Path dir;
@@ -83,7 +88,7 @@ class CliEndToEndTest {
 
             SwarmCli.Result download = cli.run(COMMAND_TIMEOUT, "download",
                     dir.resolve("iso.bin.manifest.json").toString(), output.toString(),
-                    "127.0.0.1:" + freePort(), "127.0.0.1:" + port);
+                    DEAD_PEER, "127.0.0.1:" + port);
 
             assertThat(download.exitCode()).as(download.toString()).isZero();
         }
@@ -119,7 +124,7 @@ class CliEndToEndTest {
 
         SwarmCli.Result download = cli.run(COMMAND_TIMEOUT, "download",
                 dir.resolve("lonely.bin.manifest.json").toString(), dir.resolve("lonely.out").toString(),
-                "127.0.0.1:" + freePort());
+                DEAD_PEER);
 
         assertThat(download.exitCode()).isEqualTo(1);
         assertThat(download.stderr()).contains("download failed: Transfer incomplete: 1 of 1 chunks missing");
@@ -133,7 +138,7 @@ class CliEndToEndTest {
         Files.writeString(manifest, Files.readString(manifest).replace("\"totalSize\" : 1000", "\"totalSize\" : 999"));
 
         SwarmCli.Result download = cli.run(COMMAND_TIMEOUT, "download", manifest.toString(),
-                dir.resolve("t.out").toString(), "127.0.0.1:" + freePort());
+                dir.resolve("t.out").toString(), DEAD_PEER);
 
         assertThat(download.exitCode()).isEqualTo(1);
         assertThat(download.stderr()).contains("Invalid manifest", "does not match totalSize");
@@ -160,10 +165,4 @@ class CliEndToEndTest {
         return Files.write(dir.resolve(name), bytes);
     }
 
-    /** A port nothing listens on (bound then released). */
-    private static int freePort() throws IOException {
-        try (var socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
 }
