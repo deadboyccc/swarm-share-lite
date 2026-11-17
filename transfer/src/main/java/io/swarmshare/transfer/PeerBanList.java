@@ -63,6 +63,11 @@ public final class PeerBanList {
         return false;
     }
 
+    /** Checksum failures at which a peer is banned. */
+    public int maxChecksumFailures() {
+        return maxChecksumFailures;
+    }
+
     /** Whether {@code peer} has been banned; banned peers must not be asked for chunks. */
     public boolean isBanned(PeerInfo peer) {
         return banned.contains(peer);

@@ -286,8 +286,10 @@ public final class TransferManager {
             stateTracker.transition(desc.id(), ChunkState.IN_FLIGHT, ChunkState.VERIFYING);
             if (!verifier.verify(data, desc.sha256())) {
                 if (banList.recordChecksumFailure(source)) {
+                    // Report the threshold, not the live count: other download threads may
+                    // record further failures for this peer before this line is formatted.
                     LOG.log(Level.WARNING, "Banned peer {0} after {1} chunks failed checksum verification",
-                            source.displayAddress(), String.valueOf(banList.checksumFailures(source)));
+                            source.displayAddress(), String.valueOf(banList.maxChecksumFailures()));
                 }
                 return new TransferResult.Failure(desc.id(),
                         "checksum mismatch from " + source.displayAddress(), true);

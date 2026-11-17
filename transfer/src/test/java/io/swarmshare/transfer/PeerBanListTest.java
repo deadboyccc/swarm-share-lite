@@ -90,6 +90,12 @@ class PeerBanListTest {
     }
 
     @Test
+    void threshold_isExposedForReporting() {
+        assertThat(new PeerBanList().maxChecksumFailures()).isEqualTo(PeerBanList.DEFAULT_MAX_CHECKSUM_FAILURES);
+        assertThat(new PeerBanList(5).maxChecksumFailures()).isEqualTo(5);
+    }
+
+    @Test
     void threshold_mustBePositive() {
         assertThatThrownBy(() -> new PeerBanList(0)).isInstanceOf(IllegalArgumentException.class);
     }

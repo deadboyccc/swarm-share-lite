@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.text.MessageFormat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -23,7 +24,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -236,6 +242,42 @@ class TransferManagerTest {
         assertThat(bans.isBanned(liar)).isTrue();
         assertThat(bans.isBanned(honest)).isFalse();
         assertThat(f.connector().fetchesFrom(liar)).as("no requests after the ban").isEqualTo(3);
+    }
+
+    @Test
+    void start_banWarning_reportsTheThresholdEvenWhenMoreFailuresRaceIn() throws Exception {
+        Fixture f = fixture(64 * 10, 10); // 64 chunks, all first sent to the liar concurrently
+        PeerInfo liar = peer();
+        PeerInfo honest = peer();
+        f.connector().alwaysCorrupt(liar).withFetchDelay(Duration.ofMillis(5));
+        List<String> warnings = new CopyOnWriteArrayList<>();
+        Logger jul = Logger.getLogger(TransferManager.class.getName());
+        Handler capture = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel() == Level.WARNING) {
+                    warnings.add(MessageFormat.format(record.getMessage(), record.getParameters()));
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        jul.addHandler(capture);
+        try {
+            manager(f, List.of(liar, honest), f.storage(), f.connector()).start();
+        } finally {
+            jul.removeHandler(capture);
+        }
+
+        assertStorageHoldsFile(f);
+        assertThat(warnings).containsExactly(
+                "Banned peer " + liar.displayAddress() + " after 3 chunks failed checksum verification");
     }
 
     @Test
