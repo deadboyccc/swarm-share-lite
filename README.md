@@ -6,7 +6,7 @@
 
 > P2P chunk-based file distribution with logarithmic peer scaling.
 
-Traditional file distribution bottlenecks at the source. `swarm-share-lite` turns every peer that finishes downloading a chunk into a server for that chunk — throughput scales with the swarm instead of the seeder's bandwidth.
+Traditional file distribution bottlenecks at the source. `swarm-share-lite` splits a file into SHA-256-verified chunks and downloads them in parallel from every peer that has them. Any machine that finishes a download can seed the file in turn, so the number of sources grows with the swarm.
 
 ## How It Works
 
@@ -14,7 +14,6 @@ Traditional file distribution bottlenecks at the source. `swarm-share-lite` turn
 2. **Discovery** — peers exchange `BitSet` piece-maps to find who has what.
 3. **Parallel transfer** — missing chunks are fetched concurrently (one virtual thread each), verified via SHA-256, and written directly to their file offset.
 4. **Resume** — on restart, existing chunks are rehashed and skipped; the file itself is the recovery log.
-5. **Promotion** — a peer starts serving a chunk the moment it's verified.
 
 Built on Java 25 virtual threads: natural blocking I/O code, no thread-pool tuning, cheap concurrency at scale.
 
@@ -26,14 +25,14 @@ Built on Java 25 virtual threads: natural blocking I/O code, no thread-pool tuni
 ./gradlew :cli:installDist            # JVM distribution -> cli/build/install/swarm-share
 CLI=cli/build/install/swarm-share/bin/swarm-share
 
-# Seed a file (writes ubuntu.iso.manifest.json next to it, serves on port 7070)
-$CLI seed /tmp/ubuntu.iso 7070
+# Seed a file: writes ubuntu.iso.manifest.json next to it and serves on port 7070
+$CLI seed --file /tmp/ubuntu.iso --port 7070
 
-# Download using the manifest + one or more peer addresses
-$CLI download /tmp/ubuntu.iso.manifest.json ./ubuntu.iso 192.168.1.10:7070
+# On another machine: download it using the manifest and one or more peers
+$CLI leech --manifest ubuntu.iso.manifest.json --peer 192.168.1.10:7070 --output ./ubuntu.iso
 ```
 
-Also available: `build-manifest` (generate a manifest without seeding). Run any command with `--help` for full usage.
+Also available: `build-manifest` (generate a manifest without seeding) and `download` (positional form of `leech`). Run `help <command>` or any command with `--help` for full usage.
 
 Native executable (no JVM needed at runtime):
 

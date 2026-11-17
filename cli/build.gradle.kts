@@ -8,7 +8,7 @@ plugins {
 }
 
 application {
-    mainClass = "io.swarmshare.cli.Main"
+    mainClass = "io.swarmshare.cli.SwarmShareCli"
     applicationName = "swarm-share"
 }
 
@@ -52,6 +52,8 @@ testing {
             useJUnitJupiter("6.1.3")
             dependencies {
                 implementation("org.assertj:assertj-core:3.27.7")
+                // Runs seeder and leechers as separate hosts on a Docker network (LanSwarmTest).
+                implementation("org.testcontainers:testcontainers:2.0.5")
             }
             targets.all {
                 testTask.configure {
@@ -60,6 +62,7 @@ testing {
                     dependsOn(tasks.installDist)
                     inputs.files(tasks.installDist)
                     systemProperty("swarm.cli", installedCli.get().asFile.absolutePath)
+                    jvmArgs("--enable-native-access=ALL-UNNAMED") // Testcontainers' JNA
                 }
             }
         }
@@ -77,6 +80,7 @@ tasks.register<Test>("nativeE2eTest") {
     dependsOn(tasks.named("nativeCompile"))
     inputs.files(tasks.named("nativeCompile"))
     systemProperty("swarm.cli", nativeCli.get().asFile.absolutePath)
+    jvmArgs("--enable-native-access=ALL-UNNAMED") // Testcontainers' JNA
 }
 
 tasks.check {

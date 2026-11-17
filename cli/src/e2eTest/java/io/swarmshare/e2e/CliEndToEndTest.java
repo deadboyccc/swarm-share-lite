@@ -16,9 +16,10 @@ import java.util.Random;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The main user flows from the README and ARCHITECTURE.md, run against the packaged
- * executable: build a manifest, seed a file, download it from one or more peers,
- * resume a partial download, and fail clearly when the swarm cannot help.
+ * The main user flows from the README and ARCHITECTURE.md §13, run against the
+ * packaged executable on loopback: build a manifest, seed a file, leech it from one
+ * or more peers, resume a partial download, and fail clearly when the swarm cannot
+ * help. {@link LanSwarmTest} runs the same flows across separate hosts.
  */
 @Timeout(120)
 class CliEndToEndTest {
@@ -46,7 +47,47 @@ class CliEndToEndTest {
         SwarmCli.Result result = cli.run(COMMAND_TIMEOUT, "--help");
 
         assertThat(result.exitCode()).as(result.toString()).isZero();
-        assertThat(result.stdout()).contains("seed", "build-manifest", "download");
+        assertThat(result.stdout()).contains("seed", "leech", "build-manifest", "download", "help");
+    }
+
+    @Test
+    void seedThenLeech_withSpecOptions_reproducesTheFileByteForByte() throws Exception {
+        Path source = randomFile("ubuntu.iso", 3 * MIB + 77);
+        Path manifest = dir.resolve("shared/ubuntu.manifest.json");
+        Path output = dir.resolve("downloads/ubuntu.iso");
+
+        try (SwarmCli.Running seeder = cli.start("seed", "--file", source.toString(), "--port", "0",
+                "--manifest-out", manifest.toString())) {
+            int port = seeder.awaitListeningPort(COMMAND_TIMEOUT);
+            assertThat(seeder.stdout()).contains("Manifest hash: ", "Total chunks:  4");
+
+            SwarmCli.Result leech = cli.run(COMMAND_TIMEOUT, "leech", "--manifest", manifest.toString(),
+                    "--peer", "127.0.0.1:" + port, "--output", output.toString());
+
+            assertThat(leech.exitCode()).as(leech.toString()).isZero();
+            assertThat(leech.stdout()).contains("Download complete: " + output);
+        }
+        assertThat(Files.readAllBytes(output)).isEqualTo(Files.readAllBytes(source));
+    }
+
+    @Test
+    void leech_fromTwoSeeders_succeedsWhenTheFirstOneStops() throws Exception {
+        Path source = randomFile("pair.bin", 2 * MIB);
+        Path manifest = dir.resolve("pair.bin.manifest.json");
+        Path output = dir.resolve("pair.out");
+
+        try (SwarmCli.Running first = cli.start("seed", "--file", source.toString(), "--port", "0");
+             SwarmCli.Running second = cli.start("seed", "--file", source.toString(), "--port", "0")) {
+            int firstPort = first.awaitListeningPort(COMMAND_TIMEOUT);
+            int secondPort = second.awaitListeningPort(COMMAND_TIMEOUT);
+            first.stop();
+
+            SwarmCli.Result leech = cli.run(COMMAND_TIMEOUT, "leech", "--manifest", manifest.toString(),
+                    "--peer", "127.0.0.1:" + firstPort, "127.0.0.1:" + secondPort, "--output", output.toString());
+
+            assertThat(leech.exitCode()).as(leech.toString()).isZero();
+        }
+        assertThat(Files.readAllBytes(output)).isEqualTo(Files.readAllBytes(source));
     }
 
     @Test
@@ -62,7 +103,7 @@ class CliEndToEndTest {
     }
 
     @Test
-    void seedThenDownload_reproducesTheFileByteForByte() throws Exception {
+    void seedThenDownload_positionalFormStillWorks() throws Exception {
         Path source = randomFile("movie.bin", 3 * MIB + 123);
         Path output = dir.resolve("downloads/movie.bin");
 
@@ -73,7 +114,7 @@ class CliEndToEndTest {
                     dir.resolve("movie.bin.manifest.json").toString(), output.toString(), "127.0.0.1:" + port);
 
             assertThat(download.exitCode()).as(download.toString()).isZero();
-            assertThat(download.stderr()).contains("Download complete");
+            assertThat(download.stdout()).contains("Download complete: " + output);
         }
         assertThat(Files.readAllBytes(output)).isEqualTo(Files.readAllBytes(source));
     }
