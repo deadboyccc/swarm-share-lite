@@ -2,7 +2,7 @@ plugins {
     java
     jacoco
     // Applied only in :cli (see cli/build.gradle.kts); declared here to pin one version.
-    id("org.graalvm.buildtools.native") version "1.1.18" apply false
+    id("org.graalvm.buildtools.native") version "1.1.19" apply false
 }
 
 allprojects {
