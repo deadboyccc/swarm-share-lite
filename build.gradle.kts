@@ -45,7 +45,7 @@ subprojects {
 }
 
 // Hexagonal Boundary Graph: Infrastructure modules explicitly depend on core ports
-project(":manifest") { dependencies { implementation(project(":core")); implementation("com.fasterxml.jackson.core:jackson-databind:2.22.4") } }
+project(":manifest") { dependencies { implementation(project(":core")); implementation("com.fasterxml.jackson.core:jackson-databind:2.23.0") } }
 project(":storage")     { dependencies { implementation(project(":core")) } }
 project(":networking") {
     dependencies {
@@ -66,7 +66,7 @@ project(":cli")         { dependencies {
     implementation(project(":networking"))
     implementation(project(":transfer"))
     implementation("info.picocli:picocli:4.7.7")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.4")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.23.0")
 } }
 
 // One coverage number for the whole codebase: each module's unit tests also
